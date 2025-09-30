@@ -1,0 +1,35 @@
+{
+  "name": "raid-platform",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -n BACKEND,FRONTEND,STUDIO -c blue,green,magenta \"node src/backend/server.js\" \"vite --config src/frontend/vite.config.js\" \"npm run prisma:studio\"",
+    "build": "echo \"(optional)\"",
+    "prisma:generate": "prisma generate --schema src/backend/prisma/schema.prisma",
+    "prisma:push": "prisma db push --schema src/backend/prisma/schema.prisma",
+    "prisma:studio": "prisma studio --schema src/backend/prisma/schema.prisma --port 5555"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "morgan": "^1.10.1",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.3",
+    "autoprefixer": "^10.4.20",
+    "concurrently": "^8.2.2",
+    "postcss": "^8.4.47",
+    "prisma": "^5.22.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^3.4.13",
+    "vite": "^5.4.10"
+  }
+}
