@@ -1,25 +1,33 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-
-import "./index.css";                  // Tailwind entry
-import App from "./app/App.jsx";       // Dein App-Layout
+import App from "./app/App.jsx";
 import Raids from "./app/pages/Raids.jsx";
-import RaidDetail from "./app/pages/RaidDetail.jsx";
-import Chars from "./app/pages/Chars.jsx";
+import "./index.css";
 
-const Root = () => (
-  <BrowserRouter>
-    <App>
-      <Routes>
-        <Route path="/" element={<Navigate to="/raids" replace />} />
-        <Route path="/raids" element={<Raids />} />
-        <Route path="/raids/:id" element={<RaidDetail />} />
-        <Route path="/chars" element={<Chars />} />
-        <Route path="*" element={<div className="p-6">404 – Not Found</div>} />
-      </Routes>
-    </App>
-  </BrowserRouter>
-);
+// robust gegen zu frühes Laden
+function mount() {
+  const container = document.getElementById("root");
+  if (!container) {
+    throw new Error('Fehlendes <div id="root"></div> in src/frontend/index.html');
+  }
+  const root = createRoot(container);
+  root.render(
+    <React.StrictMode>
+      <BrowserRouter>
+        <App>
+          <Routes>
+            <Route path="/" element={<Navigate to="/raids" replace />} />
+            <Route path="/raids" element={<Raids />} />
+          </Routes>
+        </App>
+      </BrowserRouter>
+    </React.StrictMode>
+  );
+}
 
-createRoot(document.getElementById("root")).render(<Root />);
+if (document.readyState === "loading") {
+  window.addEventListener("DOMContentLoaded", mount);
+} else {
+  mount();
+}

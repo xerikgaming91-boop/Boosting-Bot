@@ -1,33 +1,33 @@
+// src/backend/routes/leads.js
 import express from 'express';
-import { listRaidleads, getDiscordStatus, ensureGuildCache } from '../services/discord.js';
-import { prisma } from '../prismaClient.js';
+import { listRaidleads, getDiscordStatus } from '../services/discord.js';
 
 const router = express.Router();
 
-router.get('/', async (_req, res, next) => {
+// liefert Lead-Liste
+router.get('/', async (req, res) => {
   try {
-    await ensureGuildCache();
     const leads = await listRaidleads();
-
-    // DB-Flag für isRaidlead aktualisieren (optional)
-    await Promise.all(
-      leads.map((l) =>
-        prisma.user.upsert({
-          where: { discordId: l.id },
-          update: { username: l.username, isRaidlead: true },
-          create: { discordId: l.id, username: l.username, isRaidlead: true }
-        })
-      )
-    );
-
-    res.json({ items: leads });
+    return res.json({ leads });
   } catch (e) {
-    next(e);
+    console.error('[leads] GET / error:', e);
+    return res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
-router.get('/debug', async (_req, res) => {
-  res.json({ status: getDiscordStatus() });
+// Debug
+router.get('/debug', async (req, res) => {
+  try {
+    const status = await getDiscordStatus();
+    const leads = await listRaidleads().catch(() => []);
+    return res.json({
+      status,
+      sampleCount: leads.length,
+      sample: leads.slice(0, 5),
+    });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
 });
 
 export default router;

@@ -1,6 +1,5 @@
 generator client {
   provider = "prisma-client-js"
-  output   = "../node_modules/@prisma/client"
 }
 
 datasource db {
@@ -9,7 +8,7 @@ datasource db {
 }
 
 model User {
-  id         String   @id @default(cuid())
+  id         Int      @id @default(autoincrement())
   discordId  String   @unique
   username   String
   avatar     String?
@@ -18,12 +17,12 @@ model User {
 }
 
 model Raid {
-  id         String   @id @default(cuid())
+  id         Int      @id @default(autoincrement())
   title      String
-  difficulty String    // "Normal" | "Heroic" | "Mythic"
-  lootType   String    // "Unsaved" | "Saved" | "VIP"
+  difficulty String
+  lootType   String
   bosses     Int?
   date       DateTime
-  lead       String     // discord user id
+  lead       String
   createdAt  DateTime @default(now())
 }
