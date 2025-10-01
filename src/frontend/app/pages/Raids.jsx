@@ -1,213 +1,340 @@
-// src/frontend/app/pages/Raids.jsx
 import React, { useEffect, useMemo, useState } from "react";
-import { LeadsAPI, RaidsAPI } from "../../api.js";
+import { LeadsAPI, RaidsAPI } from "../../api.js"; // belassen wie in deinem Projekt
 
+/** Konstanten */
+const BASE_TITLE = "Manaforge";
 const DIFFS = ["Normal", "Heroic", "Mythic"];
 const LOOT_BY_DIFF = {
-  Normal: ["Unsaved", "VIP", "Saved"],
-  Heroic: ["Unsaved", "VIP", "Saved"],
-  Mythic: ["VIP"] // nur VIP bei Mythic
+  Normal: ["Saved", "Unsaved", "VIP"],
+  Heroic: ["Saved", "Unsaved", "VIP"],
+  Mythic: ["VIP"],
 };
+const MYTHIC_BOSSES = Array.from({ length: 8 }, (_, i) => i + 1); // 1..8
 
 export default function Raids() {
+  const [auth, setAuth] = useState({
+    loading: true,
+    loggedIn: false,
+    isRaidlead: false,
+    user: null,
+  });
+
   const [leads, setLeads] = useState([]);
   const [raids, setRaids] = useState([]);
-  const [form, setForm] = useState({
-    title: "",
-    difficulty: "Heroic",
-    lootType: "VIP",
-    bosses: 8,
-    date: "",
-    lead: ""
-  });
-  const [busy, setBusy] = useState(false);
-  const [err, setErr] = useState("");
 
+  // Formular-State (ohne Base-Titel)
+  const [difficulty, setDifficulty] = useState("Heroic");
+  const [lootType, setLootType] = useState("Saved");
+  const [lead, setLead] = useState("");
+  const [dateStr, setDateStr] = useState(() => todayISO());
+  const [timeStr, setTimeStr] = useState("18:00");
+  const [bosses, setBosses] = useState(8);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  // Abhängige Optionen
+  const allowedLoot = useMemo(() => LOOT_BY_DIFF[difficulty] || [], [difficulty]);
+
+  // Titel automatisch generieren
+  // - Normal/Heroic: "Manaforge Heroic VIP"
+  // - Mythic:       "Manaforge Mythic 3/8 VIP"
+  const autoTitle = useMemo(() => {
+    const parts =
+      difficulty === "Mythic"
+        ? [BASE_TITLE, "Mythic", `${bosses}/8`, lootType]
+        : [BASE_TITLE, difficulty, lootType];
+    return parts.filter(Boolean).join(" ").trim();
+  }, [difficulty, lootType, bosses]);
+
+  // Auth laden
   useEffect(() => {
     (async () => {
       try {
-        const data = await LeadsAPI.list();
-        // Erwartetes Format vom Backend: { leads: [ { id, username, displayName, avatar } ] }
-        const mapped = (data?.leads ?? []).map((u) => ({
-          id: u.id,
-          label: u.displayName || u.username || u.id
-        }));
-        setLeads(mapped);
-        if (mapped.length && !form.lead) {
-          setForm((f) => ({ ...f, lead: mapped[0].id }));
+        const r = await fetch("/api/auth/me", { credentials: "include" });
+        const j = await r.json();
+        if (j?.ok && j.user) {
+          setAuth({
+            loading: false,
+            loggedIn: true,
+            isRaidlead: !!j.user.isRaidlead,
+            user: j.user,
+          });
+        } else {
+          setAuth({ loading: false, loggedIn: false, isRaidlead: false, user: null });
         }
-      } catch (e) {
-        console.error("Leads load failed", e);
+      } catch {
+        setAuth({ loading: false, loggedIn: false, isRaidlead: false, user: null });
       }
+    })();
+  }, []);
+
+  // Raids immer laden (Liste ist öffentlich sichtbar)
+  useEffect(() => {
+    refreshRaids();
+  }, []);
+
+  async function refreshRaids() {
+    try {
+      const r = await RaidsAPI.list();
+      setRaids(r.raids ?? []);
+    } catch {
+      setRaids([]);
+    }
+  }
+
+  // Leads nur laden, wenn Raidlead (und eingeloggt)
+  useEffect(() => {
+    if (!auth.loggedIn || !auth.isRaidlead) return;
+    (async () => {
       try {
-        setRaids(await RaidsAPI.list());
-      } catch (e) {
-        console.error("Raids load failed", e);
+        const l = await LeadsAPI.list(); // ruft /api/leads (erfordert Auth)
+        const arr = l.leads ?? [];
+        setLeads(arr);
+        if (arr.length > 0 && !lead) setLead(arr[0].id);
+      } catch {
+        setLeads([]);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [auth.loggedIn, auth.isRaidlead]);
 
-  const lootOptions = useMemo(
-    () => LOOT_BY_DIFF[form.difficulty] || [],
-    [form.difficulty]
-  );
+  // Difficulty-Wechsel: Loot validieren/resetten; Boss-UI justieren
+  useEffect(() => {
+    const allowed = LOOT_BY_DIFF[difficulty] || [];
+    if (!allowed.includes(lootType)) setLootType(allowed[0] ?? "Saved");
+    if (difficulty === "Mythic") setBosses((b) => (b >= 1 && b <= 8 ? b : 8));
+  }, [difficulty]); // eslint-disable-line
 
-  async function submit(e) {
+  // Submit (guarded)
+  async function onCreateRaid(e) {
     e.preventDefault();
+    if (!auth.isRaidlead) return; // doppelte Absicherung
     setBusy(true);
-    setErr("");
+    setError("");
+
     try {
+      const when = combineDateTime(dateStr, timeStr); // ISO string
       const payload = {
-        title: form.title?.trim() || `${form.difficulty} ${form.lootType}`,
-        difficulty: form.difficulty,
-        lootType: form.lootType,
-        bosses: Number(form.bosses) || null,
-        date: form.date ? new Date(form.date).toISOString() : null,
-        lead: form.lead
+        title: autoTitle,
+        difficulty,
+        lootType,
+        lead: lead || auth.user?.id, // fallback auf eingeloggten User
+        date: when,
+        ...(difficulty === "Mythic" ? { bosses } : {}),
       };
+
       await RaidsAPI.create(payload);
-      setRaids(await RaidsAPI.list());
-      alert("Raid erstellt.");
+      await refreshRaids();
     } catch (err) {
-      console.error(err);
-      setErr(String(err.message || err));
+      setError(err?.message || "Fehler beim Erstellen");
     } finally {
       setBusy(false);
     }
   }
 
+  async function onDelete(id) {
+    if (!auth.isRaidlead) return; // nur Raidlead darf löschen (UI + Backend-Guard)
+    if (!confirm("Diesen Raid wirklich löschen?")) return;
+    try {
+      await RaidsAPI.remove(id);
+      await refreshRaids();
+    } catch (err) {
+      alert(err?.message || "Löschen fehlgeschlagen");
+    }
+  }
+
+  const showForm = auth.loggedIn && auth.isRaidlead;
+
   return (
-    <div className="grid gap-6">
-      <form onSubmit={submit} className="grid gap-4 border border-neutral-800 rounded-lg p-4">
-        <div className="grid sm:grid-cols-2 gap-4">
-          <label className="grid gap-1">
-            <span className="text-sm opacity-80">Titel</span>
-            <input
-              className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2"
-              value={form.title}
-              onChange={(e) => setForm({ ...form, title: e.target.value })}
-              placeholder="Manaforge Heroic VIP"
-            />
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm opacity-80">Raidlead</span>
-            <select
-              className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2"
-              value={form.lead}
-              onChange={(e) => setForm({ ...form, lead: e.target.value })}
-            >
-              {leads.length === 0 ? (
-                <option value="" disabled>
-                  (keine Leads geladen)
-                </option>
-              ) : null}
-              {leads.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {u.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm opacity-80">Schwierigkeit</span>
-            <select
-              className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2"
-              value={form.difficulty}
-              onChange={(e) => {
-                const difficulty = e.target.value;
-                const lootType = (LOOT_BY_DIFF[difficulty] || [])[0] || "VIP";
-                setForm({ ...form, difficulty, lootType });
-              }}
-            >
-              {DIFFS.map((d) => (
-                <option key={d} value={d}>
-                  {d}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          <label className="grid gap-1">
-            <span className="text-sm opacity-80">Loot</span>
-            <select
-              className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2"
-              value={form.lootType}
-              onChange={(e) => setForm({ ...form, lootType: e.target.value })}
-            >
-              {lootOptions.map((l) => (
-                <option key={l} value={l}>
-                  {l}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          {form.difficulty === "Mythic" && (
-            <label className="grid gap-1">
-              <span className="text-sm opacity-80">Bosse</span>
-              <input
-                type="number"
-                min={1}
-                max={10}
-                className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2"
-                value={form.bosses}
-                onChange={(e) =>
-                  setForm({ ...form, bosses: Number(e.target.value) || 0 })
-                }
-              />
-            </label>
-          )}
-
-          <label className="grid gap-1">
-            <span className="text-sm opacity-80">Datum/Zeit</span>
-            <input
-              type="datetime-local"
-              className="bg-neutral-900 border border-neutral-700 rounded px-3 py-2"
-              value={form.date}
-              onChange={(e) => setForm({ ...form, date: e.target.value })}
-            />
-          </label>
-        </div>
-
-        {err && (
-          <div className="text-sm text-red-400 border border-red-800 bg-red-950/30 rounded px-3 py-2">
-            {err}
-          </div>
-        )}
-
-        <div>
-          <button
-            disabled={busy || !form.lead}
-            className="px-4 py-2 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50"
-          >
-            {busy ? "Erstelle…" : "Raid erstellen"}
-          </button>
-        </div>
-      </form>
-
-      <section className="grid gap-2">
-        <h2 className="font-semibold">Raids</h2>
-        <div className="grid gap-2">
-          {raids.map((r) => (
-            <div
-              key={r.id}
-              className="border border-neutral-800 rounded px-3 py-2"
-            >
-              <div className="text-sm opacity-80">{r.title}</div>
-              <div className="text-xs opacity-60">
-                {r.difficulty} · {r.lootType} · {r.bosses ?? "-"} Bosse ·{" "}
-                {r.date ? new Date(r.date).toLocaleString() : "-"}
+    <div className="p-6 space-y-6">
+      {/* Banner: nicht eingeloggt */}
+      {!auth.loading && !auth.loggedIn && (
+        <div className="max-w-5xl mx-auto panel">
+          <div className="panel-body flex items-center justify-between gap-4">
+            <div>
+              <div className="text-slate-200 font-semibold">Nicht angemeldet</div>
+              <div className="text-slate-400 text-sm">
+                Melde dich mit Discord an, um Raids zu erstellen.
               </div>
             </div>
-          ))}
-          {raids.length === 0 && (
-            <div className="text-sm opacity-60">(keine Raids)</div>
-          )}
+            <a href="/api/auth/discord" className="btn btn-primary">Mit Discord anmelden</a>
+          </div>
         </div>
-      </section>
+      )}
+
+      {/* Banner: eingeloggt aber keine Raidlead-Rolle */}
+      {auth.loggedIn && !auth.isRaidlead && (
+        <div className="max-w-5xl mx-auto panel">
+          <div className="panel-body">
+            <div className="text-slate-200 font-semibold mb-1">Keine Berechtigung</div>
+            <div className="text-slate-400 text-sm">
+              Du benötigst die <span className="font-medium">Raidlead</span>-Rolle, um Raids zu erstellen.
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Formular-Panel – nur für Raidleads */}
+      {showForm && (
+        <div className="max-w-5xl mx-auto panel">
+          <div className="panel-body">
+            <form onSubmit={onCreateRaid} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Auto-Titel (read-only) */}
+              <div className="field md:col-span-1">
+                <div className="label-row">
+                  <label>Titel (automatisch)</label>
+                </div>
+                <input type="text" className="input" value={autoTitle} readOnly />
+                <p className="help">
+                  Wird live aus <span className="font-medium">{BASE_TITLE}</span> +{" "}
+                  {difficulty === "Mythic" ? "Mythic + X/8 + " : "Difficulty + "}Loot gebaut.
+                </p>
+              </div>
+
+              {/* Datum & Uhrzeit */}
+              <div className="field md:col-span-1">
+                <div className="label-row"><label>Datum & Uhrzeit</label></div>
+                <div className="grid grid-cols-2 gap-3">
+                  <input type="date" value={dateStr} onChange={(e)=>setDateStr(e.target.value)} className="input" required />
+                  <input type="time" value={timeStr} onChange={(e)=>setTimeStr(e.target.value)} className="input" required />
+                </div>
+              </div>
+
+              {/* Loot-Type */}
+              <div className="field">
+                <div className="label-row"><label>Loot-Type</label></div>
+                <select value={lootType} onChange={(e)=>setLootType(e.target.value)} className="select">
+                  {allowedLoot.map((lt)=>(<option key={lt} value={lt}>{lt}</option>))}
+                </select>
+              </div>
+
+              {/* Difficulty */}
+              <div className="field">
+                <div className="label-row"><label>Difficulty</label></div>
+                <select value={difficulty} onChange={(e)=>setDifficulty(e.target.value)} className="select">
+                  {DIFFS.map((d)=>(<option key={d} value={d}>{d}</option>))}
+                </select>
+              </div>
+
+              {/* Raid Lead – aus Discord (nur wenn Raidlead) */}
+              <div className="field">
+                <div className="label-row"><label>Raid Lead (aus Server)</label></div>
+                <select
+                  value={lead}
+                  onChange={(e)=>setLead(e.target.value)}
+                  className="select"
+                  required
+                >
+                  {leads.map((l)=>(
+                    <option key={l.id} value={l.id}>
+                      {(l.displayName || l.username || l.id)}
+                    </option>
+                  ))}
+                </select>
+                <p className="help">Nur Nutzer mit Raidlead-Rolle werden hier angezeigt.</p>
+              </div>
+
+              {/* Bosse – nur bei Mythic sichtbar */}
+              {difficulty === "Mythic" && (
+                <div className="field">
+                  <div className="label-row"><label>Bosse (Mythic)</label></div>
+                  <select value={bosses} onChange={(e)=>setBosses(parseInt(e.target.value,10))} className="select">
+                    {MYTHIC_BOSSES.map((n)=>(<option key={n} value={n}>{n}/8</option>))}
+                  </select>
+                </div>
+              )}
+
+              {/* Submit */}
+              <div className="md:col-span-2 flex items-center gap-3">
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="btn btn-primary disabled:opacity-60 disabled:cursor-not-allowed"
+                  title="Raid erstellen"
+                >
+                  {busy ? "Erstelle..." : "Raid erstellen"}
+                </button>
+                {error && <span className="text-sm text-red-400">{error}</span>}
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Geplante Raids – für alle sichtbar */}
+      <div className="max-w-5xl mx-auto panel">
+        <div className="panel-head">Geplante Raids</div>
+        <div className="panel-body overflow-x-auto">
+          <table className="table">
+            <thead>
+              <tr className="text-left text-slate-400">
+                <th>#</th>
+                <th>Titel</th>
+                <th>Diff</th>
+                <th>Loot</th>
+                <th>Bosse</th>
+                <th>Datum</th>
+                <th>Lead</th>
+                {auth.isRaidlead && <th></th>}
+              </tr>
+            </thead>
+            <tbody>
+              {raids.length === 0 ? (
+                <tr>
+                  <td className="py-3 text-slate-400" colSpan={auth.isRaidlead ? 8 : 7}>
+                    Noch keine Raids.
+                  </td>
+                </tr>
+              ) : (
+                raids.map((r) => (
+                  <tr key={r.id} className="border-b border-slate-900 hover:bg-slate-800/40">
+                    <td className="px-4 py-3">{r.id}</td>
+                    <td className="px-4 py-3">{r.title}</td>
+                    <td className="px-4 py-3">{r.difficulty}</td>
+                    <td className="px-4 py-3">{r.lootType}</td>
+                    <td className="px-4 py-3">{r.bosses ?? "-"}</td>
+                    <td className="px-4 py-3">{formatDateTime(r.date)}</td>
+                    <td className="px-4 py-3">{r.lead}</td>
+                    {auth.isRaidlead && (
+                      <td className="px-4 py-3">
+                        <button
+                          onClick={() => onDelete(r.id)}
+                          className="btn btn-danger"
+                          title="Raid löschen"
+                        >
+                          Löschen
+                        </button>
+                      </td>
+                    )}
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
+}
+
+/** Utils */
+function todayISO() {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+function combineDateTime(dateStr, timeStr) {
+  const [h = "00", min = "00"] = (timeStr || "00:00").split(":");
+  const d = new Date(dateStr || todayISO());
+  d.setHours(parseInt(h, 10), parseInt(min, 10), 0, 0);
+  return d.toISOString();
+}
+
+function formatDateTime(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "-";
+  return d.toLocaleString();
 }

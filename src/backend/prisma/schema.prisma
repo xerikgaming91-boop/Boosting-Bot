@@ -12,7 +12,6 @@ model User {
   discordId  String   @unique
   username   String
   avatar     String?
-  isRaidlead Boolean  @default(false)
   createdAt  DateTime @default(now())
 }
 
@@ -21,8 +20,25 @@ model Raid {
   title      String
   difficulty String
   lootType   String
-  bosses     Int?
   date       DateTime
-  lead       String
-  createdAt  DateTime @default(now())
+  lead       String?
+  bosses     Int      @default(8)
+  channelId  String?
 }
+
+model Chars {
+  id        Int      @id @default(autoincrement())
+  ownerId   String
+  name      String
+  realm     String   // slug, z.B. "silvermoon"
+  region    String   // EU | US | ...
+  class     String?
+  spec      String?
+  rioScore  Float?
+  rioJson   String?  // <-- statt Json, wir speichern JSON.stringify(...)
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@unique([ownerId, name, realm, region], name: "ownerId_name_realm_region")
+}
+

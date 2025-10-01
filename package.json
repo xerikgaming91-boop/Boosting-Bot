@@ -1,19 +1,18 @@
 {
-  "name": "raid-platform",
-  "private": true,
-  "type": "module",
+  "name": "boosting-bot",
   "version": "0.1.0",
+  "type": "module",
+  "private": true,
   "scripts": {
-    "dev": "concurrently -n BACKEND,FRONTEND,STUDIO -c blue,green,magenta \"node src/backend/server.js\" \"vite\" \"prisma studio --schema src/backend/prisma/schema.prisma --port 5555\"",
-    "start": "node src/backend/server.js",
+    "dev": "concurrently -n BACKEND,FRONTEND,STUDIO -c blue,green,magenta \"node src/backend/server.js\" \"vite frontend\" \"prisma studio --schema src/backend/prisma/schema.prisma --port 5555\"",
     "build": "vite build",
-    "preview": "vite preview",
     "prisma:generate": "prisma generate --schema src/backend/prisma/schema.prisma",
-    "prisma:migrate": "prisma migrate dev --schema src/backend/prisma/schema.prisma --name init",
-    "prisma:studio": "prisma studio --schema src/backend/prisma/schema.prisma --port 5555"
+    "prisma:push": "prisma db push --schema src/backend/prisma/schema.prisma",
+    "prisma:studio": "prisma studio --schema src/backend/prisma/schema.prisma --port 5555",
+    "bot:selftest": "node src/backend/discord/selftest.mjs"
   },
   "dependencies": {
-    "@prisma/client": "^5.22.0",
+    "@prisma/client": "^6.16.3",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "discord.js": "^14.16.3",
@@ -24,16 +23,16 @@
     "node-fetch": "^3.3.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.26.2",
-    "zod": "^3.23.8"
+    "react-router-dom": "^6.26.2"
   },
   "devDependencies": {
-    "@vitejs/plugin-react": "^4.3.2",
-    "autoprefixer": "^10.4.20",
+    "@tailwindcss/forms": "^0.5.10",
+    "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.4.21",
     "concurrently": "^8.2.2",
-    "postcss": "^8.4.47",
+    "postcss": "^8.5.6",
     "prisma": "^5.22.0",
-    "tailwindcss": "^3.4.13",
+    "tailwindcss": "^3.4.17",
     "vite": "^5.4.8"
   }
 }

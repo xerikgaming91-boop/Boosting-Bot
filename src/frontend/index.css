@@ -2,4 +2,81 @@
 @tailwind components;
 @tailwind utilities;
 
-/* eigene Styles … */
+/* ====== Base (Dark Look) ====== */
+@layer base {
+  html, body { @apply bg-slate-950 text-slate-200 antialiased; }
+  ::selection { @apply bg-brand/30; }
+  a { @apply text-slate-200 hover:text-white underline decoration-slate-500/50 hover:decoration-brand; }
+  label { @apply text-slate-300 text-sm font-medium; }
+  small, .muted { @apply text-slate-400; }
+}
+
+/* ====== Panels / Cards ====== */
+@layer components {
+  .panel { @apply bg-slate-900/60 backdrop-blur border border-slate-800/70 rounded-2xl shadow-soft; }
+  .panel-body { @apply p-6; }
+  .panel-head { @apply px-6 py-4 border-b border-slate-800/70 text-slate-300 font-semibold; }
+}
+
+/* ====== Buttons ====== */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2 font-medium
+           transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-offset-0;
+  }
+  .btn-primary { @apply btn bg-brand hover:bg-brand-600 active:bg-brand-700 text-white shadow-soft focus:ring-brand/40; }
+  .btn-ghost   { @apply btn bg-transparent border border-slate-800/70 hover:bg-slate-800/60 text-slate-200; }
+  .btn-danger  { @apply btn bg-red-600 hover:bg-red-500 focus:ring-red-600/40 text-white; }
+  .btn-disabled { @apply opacity-60 pointer-events-none; }
+}
+
+/* ====== Formularfelder (Dark) ====== */
+@layer components {
+  .field { @apply flex flex-col; }
+  .field + .field { @apply mt-2; }
+  .label-row { @apply mb-1 flex items-center justify-between; }
+  .help { @apply mt-1 text-xs text-slate-400; }
+
+  .input, .select, .textarea,
+  input[type="text"], input[type="time"], input[type="date"], input[type="number"], input[type="search"],
+  input[type="email"], input[type="password"], select, textarea {
+    @apply bg-slate-800/60 text-slate-200 placeholder-slate-400
+           border border-slate-800/80 rounded-xl
+           focus:outline-none focus:ring-2 focus:ring-brand/60 focus:border-brand
+           disabled:opacity-60 disabled:cursor-not-allowed;
+  }
+  .input, input[type="text"], input[type="time"], input[type="date"], input[type="number"],
+  input[type="search"], input[type="email"], input[type="password"] { @apply px-3 py-2; }
+  .select, select { @apply px-3 py-2 pr-8; }
+  .textarea, textarea { @apply px-3 py-2 resize-y min-h-[110px]; }
+
+  input[type="checkbox"], input[type="radio"] {
+    @apply text-brand bg-slate-800 border-slate-800/80 focus:ring-brand/60;
+  }
+}
+
+/* ====== Tabellen (Geplante Raids) ====== */
+@layer components {
+  .table { @apply w-full border-separate border-spacing-0 text-sm; }
+  .table thead th {
+    @apply sticky top-0 z-10 bg-slate-900/70 text-slate-400 font-semibold uppercase tracking-wide text-xs;
+  }
+  .table th, .table td { @apply px-4 py-3 border-b border-slate-900; }
+  .table tbody tr { @apply hover:bg-slate-800/40 transition-colors; }
+  .badge { @apply inline-flex items-center rounded-lg px-2 py-1 text-xs font-medium bg-slate-800/70 border border-slate-800/70 text-slate-300; }
+}
+
+/* ===== Force-Dark (falls im Markup noch helle Klassen stehen) ===== */
+@layer utilities {
+  .bg-white, .bg-gray-50, .bg-gray-100, .bg-gray-200, .bg-gray-300,
+  .bg-slate-50, .bg-slate-100, .bg-slate-200 {
+    background-color: rgb(15 23 42 / 0.60) !important; /* slate-900/60 */
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    border: 1px solid rgb(30 41 59 / 0.7) !important;  /* slate-800/70 */
+    border-radius: 1rem; box-shadow: 0 8px 30px rgba(0,0,0,.30), inset 0 1px 0 rgba(255,255,255,.03);
+  }
+  .text-black, .text-gray-800, .text-gray-700, .text-slate-800 { color: rgb(226 232 240) !important; }
+  .border-gray-100, .border-gray-200, .border-gray-300, .border-slate-100, .border-slate-200 {
+    border-color: rgb(30 41 59 / 0.7) !important;  /* slate-800/70 */
+  }
+}

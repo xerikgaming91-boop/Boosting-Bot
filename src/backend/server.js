@@ -1,60 +1,55 @@
-// src/backend/server.js
+// ESM
+import fs from 'node:fs';
+import path from 'node:path';
 import express from 'express';
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
-import morgan from 'morgan';
-import { env } from './config/env.js';
+import dotenv from 'dotenv';
+import { PrismaClient } from '@prisma/client';
 
-import authRouter from './routes/auth.js';
-import leadsRouter from './routes/leads.js';
-import raidsRouter from './routes/raids.js';
+import { ensureBotReady, discordStatus } from './discord/index.js';
+import { authRouter } from './routes/auth.js';
+import { leadsRouter } from './routes/leads.js';
+import { makeRaidsRouter } from './routes/raids.js';
+import { makeCharsRouter } from './routes/chars.js';
 
+const CWD = process.cwd();
+const envPath = path.join(CWD, '.env');
+console.log('[BACKEND] [ENV] candidates:');
+if (fs.existsSync(envPath)) console.log(`[BACKEND]   - ${envPath}`);
+dotenv.config({ path: envPath });
+console.log(`[BACKEND] [ENV] loaded from: ${fs.existsSync(envPath) ? envPath : '(process env only)'}`);
+
+const ENV = {
+  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
+  BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:4000',
+};
+
+const prisma = new PrismaClient();
 const app = express();
 
-app.use(morgan('dev'));
-app.use(express.json());
-app.use(cookieParser(env.SESSION_SECRET));
+app.use(cors({ origin: ENV.FRONTEND_URL, credentials: true }));
+app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
 
-app.use(
-  cors({
-    origin: env.FRONTEND_URL,
-    credentials: true,
-  })
-);
-
-// Mini-Debug, um zu sehen, was wirklich ankommt (safe, keine Secrets)
-app.get('/api/debug/env', (_req, res) => {
-  const mask = (v) => (v ? `${v.slice(0, 4)}…${v.slice(-4)}` : null);
-  res.json({
-    FRONTEND_URL: env.FRONTEND_URL,
-    BACKEND_URL: env.BACKEND_URL,
-    OAUTH_REDIRECT_URI: env.OAUTH_REDIRECT_URI,
-    GUILD_ID: env.GUILD_ID || null,
-    RAIDLEAD_ROLE_ID: env.RAIDLEAD_ROLE_ID || null,
-    BOT_TOKEN_SET: !!env.DISCORD_BOT_TOKEN,
-  });
+// Bot hochfahren (Logs kommen in der Konsole)
+ensureBotReady().catch(err => {
+  console.error('❌ Discord-Bot konnte nicht starten:', err?.message || err);
 });
 
-// Health
-app.get('/health', (_req, res) => res.json({ ok: true }));
+// Health + Discord Status
+app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
+app.get('/api/discord/status', (_req, res) => res.json(discordStatus()));
 
-// API
+// Routen
 app.use('/api/auth', authRouter);
 app.use('/api/leads', leadsRouter);
-app.use('/api/raids', raidsRouter);
+app.use('/api/raids', makeRaidsRouter({ prisma }));
+app.use('/api/chars', makeCharsRouter({ prisma }));
 
-// Root -> Frontend
-app.get('/', (_req, res) => res.redirect(env.FRONTEND_URL));
-
-app.listen(env.PORT, () => {
-  const short = (v) => (v ? `${v.slice(0, 4)}…${v.slice(-4)}` : '(empty)');
-  console.log(`API listening on http://localhost:${env.PORT}`);
-  console.log('[ENV] summary:', {
-    FRONTEND_URL: env.FRONTEND_URL,
-    BACKEND_URL: env.BACKEND_URL,
-    OAUTH_REDIRECT_URI: env.OAUTH_REDIRECT_URI,
-    GUILD_ID: env.GUILD_ID || '(empty)',
-    RAIDLEAD_ROLE_ID: env.RAIDLEAD_ROLE_ID || '(empty)',
-    BOT_TOKEN_SET: !!env.DISCORD_BOT_TOKEN,
-  });
+// Start
+const url = new URL(process.env.BACKEND_URL || 'http://localhost:4000');
+const PORT = Number(url.port) || 4000;
+app.listen(PORT, () => {
+  console.log(`[BACKEND] API listening on http://localhost:${PORT}`);
 });

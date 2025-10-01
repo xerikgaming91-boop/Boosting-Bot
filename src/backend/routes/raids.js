@@ -1,66 +1,88 @@
-// src/backend/routes/raids.js
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
-import { createRaidTextChannel } from '../services/discord.js';
+import { requireRaidLead } from '../middleware/auth.js';
+import { postRaidAnnouncement, deleteRaidChannel } from '../discord/channels.js';
 
-const prisma = new PrismaClient();
-const router = express.Router();
+export function makeRaidsRouter({ prisma }) {
+  const router = express.Router();
 
-/**
- * GET /api/raids
- * Listet Raids (einfach, ohne Filter/Paging)
- */
-router.get('/', async (_req, res) => {
-  try {
-    const raids = await prisma.raid.findMany({
-      orderBy: { createdAt: 'desc' },
-    });
-    res.json(raids);
-  } catch (e) {
-    console.error('[raids] GET / error:', e);
-    res.status(500).json({ error: 'failed list' });
-  }
-});
-
-/**
- * POST /api/raids
- * Erwartet body: { title, difficulty, lootType, bosses?, date, lead? }
- * Legt DB-Eintrag an und erstellt danach den Discord-Textchannel.
- */
-router.post('/', async (req, res) => {
-  try {
-    const { title, difficulty, lootType, bosses, date, lead } = req.body || {};
-
-    // 1) Raid in DB anlegen
-    const created = await prisma.raid.create({
-      data: {
-        title: String(title || ''),
-        difficulty: String(difficulty || ''),
-        lootType: String(lootType || ''),
-        bosses: bosses == null ? null : String(bosses),
-        date: date ? new Date(date) : new Date(),
-        lead: lead ? String(lead) : null,
-      },
-    });
-
-    // 2) Discord-Channel erstellen (best effort, Fehler nicht fatal)
+  // GET /api/raids
+  router.get('/', async (_req, res) => {
     try {
-      await createRaidTextChannel({
-        date: created.date,
-        difficulty: created.difficulty,
-        lootType: created.lootType,
-        leadUserId: created.lead || undefined,
-        leadDisplayName: created.title || undefined, // fallback, wenn du hier den Lead-Namen willst, ersetze das
-      });
+      const raids = await prisma.raid.findMany({ orderBy: [{ date: 'desc' }], take: 500 });
+      res.json({ raids });
     } catch (e) {
-      console.error('[raids] channel create failed (non-fatal):', e?.message || e);
+      console.error('❌ /api/raids:', e?.message || e);
+      res.status(500).json({ error: 'failed_to_list_raids' });
     }
+  });
 
-    res.status(201).json(created);
-  } catch (e) {
-    console.error('[raids] POST / error:', e);
-    res.status(500).json({ error: 'failed create' });
-  }
-});
+  // POST /api/raids  (nur Raidlead)
+  router.post('/', requireRaidLead, async (req, res) => {
+    try {
+      const b = req.body || {};
+      if (!b.difficulty || !b.lootType || !b.date) {
+        return res.status(400).json({ error: 'missing_fields' });
+      }
 
-export default router;
+      const difficulty = String(b.difficulty);
+      const lootType   = String(b.lootType);
+      const isMythic   = difficulty.toLowerCase().startsWith('myth');
+      const bosses     = isMythic
+        ? (Number.isFinite(parseInt(b.bosses,10)) ? Math.min(8, Math.max(1, parseInt(b.bosses,10))) : 1)
+        : 8; // NM/HC -> 8
+
+      const data = {
+        title: (b.title || '').trim() || `${difficulty} ${lootType}`.trim(),
+        difficulty, lootType,
+        date: b.date,
+        lead: b.lead || req.user.id,
+        bosses,
+      };
+
+      const saved = await prisma.raid.create({ data });
+
+      // Channel erstellen + channelId speichern (falls Spalte vorhanden)
+      try {
+        const channelId = await postRaidAnnouncement({
+          title: saved.title, difficulty: saved.difficulty, lootType: saved.lootType,
+          bosses: saved.bosses, date: saved.date, lead: saved.lead ?? undefined,
+        });
+        try {
+          await prisma.raid.update({ where: { id: saved.id }, data: { channelId } });
+        } catch (e) {
+          console.warn('⚠️ channelId konnte nicht gespeichert werden (Spalte fehlt evtl.):', e?.message || e);
+        }
+      } catch (e) {
+        console.warn('⚠️ postRaidAnnouncement fehlgeschlagen:', e?.message || e);
+      }
+
+      res.status(200).json(saved);
+    } catch (e) {
+      console.error('❌ POST /api/raids:', e?.message || e);
+      res.status(500).json({ error: 'failed_to_create_raid' });
+    }
+  });
+
+  // DELETE /api/raids/:id (nur Raidlead)
+  router.delete('/:id', requireRaidLead, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid_id' });
+
+      const raid = await prisma.raid.findUnique({ where: { id } });
+      if (!raid) return res.status(404).json({ error: 'not_found' });
+
+      try { await deleteRaidChannel(raid); } catch (e) {
+        console.warn('⚠️ Channel-Löschung fehlgeschlagen:', e?.message || e);
+      }
+
+      const deleted = await prisma.raid.delete({ where: { id } });
+      res.json({ ok: true, deleted });
+    } catch (e) {
+      console.error('❌ DELETE /api/raids:', e?.message || e);
+      res.status(500).json({ error: 'failed_to_delete_raid' });
+    }
+  });
+
+  return router;
+}
