@@ -1,57 +1,62 @@
 // src/backend/routes/auth.js
 import "dotenv/config";
-import crypto from "node:crypto";
 import express from "express";
+import crypto from "node:crypto";
+import { URLSearchParams } from "node:url";
 import { prisma } from "../prismaClient.js";
-import {
-  getLiveRoleFlags,
-  canCreateRaid,
-  canSetRaidLead,
-  isAdminLevel,
-  upsertUser,
-} from "../utils/roles.js";
+import { ensureBotReady } from "../discord/bot.js";
 
 const router = express.Router();
 const ENV = process.env;
 
-const COOKIE_NAME = ENV.JWT_COOKIE_NAME || ENV.COOKIE_NAME || "auth";
+/* ========================= ENV / Konstanten ========================= */
+// OAuth
+const CLIENT_ID     = ENV.DISCORD_CLIENT_ID;
+const CLIENT_SECRET = ENV.DISCORD_CLIENT_SECRET;
+// akzeptiere beide Variablen-Namen, nimm OAUTH_REDIRECT_URI bevorzugt (entspricht deiner .env)
+const REDIRECT_URI  = ENV.OAUTH_REDIRECT_URI
+  || ENV.DISCORD_REDIRECT_URI
+  || `${ENV.BACKEND_URL || "http://localhost:4000"}/api/auth/callback`;
+
+// Guild / Rollen
+const GUILD_ID          = ENV.DISCORD_GUILD_ID || ENV.GUILD_ID;
+const ADMIN_ROLE_ID     = ENV.DISCORD_ROLE_ADMIN_ID || ENV.ADMIN_ROLE_ID || "";
+const RAIDLEAD_ROLE_ID  = ENV.RAIDLEAD_ROLE_ID || ENV.DISCORD_ROLE_RAIDLEAD_ID || ENV.DISCORD_ROLE_RAIDLEAD || "";
+
+// Cookies / Modus
+const COOKIE_NAME   = ENV.JWT_COOKIE_NAME || ENV.COOKIE_NAME || "bb_auth";
 const COOKIE_SECRET = ENV.JWT_Secret || ENV.COOKIE_SECRET || "dev-secret-fallback";
-const IS_PROD = (ENV.MODE || ENV.NODE_ENV) === "production";
+const IS_PROD       = (ENV.MODE || ENV.NODE_ENV) === "production";
 
-// Discord OAuth
-const DISCORD_CLIENT_ID = ENV.DISCORD_CLIENT_ID || "";
-const DISCORD_CLIENT_SECRET = ENV.DISCORD_CLIENT_SECRET || "";
-const OAUTH_REDIRECT_URI =
-  ENV.OAUTH_REDIRECT_URI || `${ENV.BACKEND_URL || "http://localhost:4000"}/api/auth/callback`;
-const GUILD_ID = ENV.DISCORD_GUILD_ID || ENV.GUILD_ID || "";
+// Optional: Auto-Refresh in /me
+const AUTH_REFRESH_ON_ME = `${ENV.AUTH_REFRESH_ON_ME || ""}`.trim() !== "" && `${ENV.AUTH_REFRESH_ON_ME}` !== "0";
 
-// --- Debug helper ---
-function dbg(...a) {
-  if (ENV.DEBUG_AUTH === "true") {
-    console.log("[AUTH-DBG]", ...a);
-  }
+// kurze Cookies für OAuth-Flow
+const OAUTH_STATE_COOKIE    = "bb_oauth_state";
+const OAUTH_REDIRECT_COOKIE = "bb_oauth_redirect";
+
+/* ========================= Helpers ========================= */
+function hmacSign(buf) {
+  return crypto.createHmac("sha256", COOKIE_SECRET).update(buf).digest();
 }
-
-// --- Cookie Sign/Verify (kompatibel zu raids.js) ---
-function signCookie(payloadObj) {
-  const payload = Buffer.from(JSON.stringify(payloadObj), "utf8");
-  const sig = crypto.createHmac("sha256", COOKIE_SECRET).update(payload).digest();
+/** v1.<payloadB64>.<sigB64> */
+function signCookie(obj) {
+  const payload = Buffer.from(JSON.stringify(obj), "utf8");
+  const sig = hmacSign(payload);
   return `v1.${payload.toString("base64")}.${sig.toString("base64")}`;
 }
-function verifyCookie(raw) {
+function readCookie(raw) {
   try {
-    const [v, pB64, sB64] = String(raw || "").split(".");
+    if (!raw || typeof raw !== "string") return null;
+    const [v, pB64, sB64] = raw.split(".");
     if (v !== "v1" || !pB64 || !sB64) return null;
     const payload = Buffer.from(pB64, "base64");
-    const expected = crypto.createHmac("sha256", COOKIE_SECRET).update(payload).digest();
+    const expected = hmacSign(payload);
     const given = Buffer.from(sB64, "base64");
     if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
     return JSON.parse(payload.toString("utf8"));
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
-
 function setAuthCookie(res, obj) {
   const value = signCookie(obj);
   res.cookie(COOKIE_NAME, value, {
@@ -59,174 +64,287 @@ function setAuthCookie(res, obj) {
     secure: IS_PROD,
     sameSite: "lax",
     path: "/",
-    maxAge: 60 * 60 * 24 * 7 * 1000, // 7 Tage
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 Tage
   });
 }
+function clearAuthCookie(res) {
+  res.clearCookie(COOKIE_NAME, { path: "/" });
+}
+function setShortCookie(res, name, value) {
+  res.cookie(name, value, {
+    httpOnly: true,
+    secure: IS_PROD,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 10 * 60 * 1000, // 10 Minuten
+  });
+}
+function readShortCookie(req, name) {
+  return req.cookies?.[name] || "";
+}
 
-function parseState(stateStr) {
+/* ---- Guild/Member/Flags per Bot holen ---- */
+async function fetchMemberAndFlags(discordUserId) {
+  const client = await ensureBotReady();
+  const guild = await client.guilds.fetch(GUILD_ID);
+  const member = await guild.members.fetch(String(discordUserId));
+
+  // Rolle-IDs
+  const roleIds = Array.from(member.roles.cache.keys());
+  const highestRole = member.roles.highest?.id || null;
+
+  // Owner dynamisch aus Guild ziehen (keine OWNER_DISCORD_ID in .env nötig)
+  let ownerId = guild.ownerId || null;
+  if (!ownerId) {
+    try {
+      const owner = await guild.fetchOwner();
+      ownerId = owner?.id || null;
+    } catch { /* ignore */ }
+  }
+
+  const isOwner = !!(ownerId && ownerId === String(discordUserId));
+  const isAdmin = isOwner || (ADMIN_ROLE_ID && roleIds.includes(ADMIN_ROLE_ID));
+  const isRaidlead = isAdmin || (RAIDLEAD_ROLE_ID && roleIds.includes(RAIDLEAD_ROLE_ID));
+
+  const displayName = member.nickname || member.user.globalName || member.user.username || null;
+
+  return {
+    flags: {
+      isOwner,
+      isAdmin,
+      isRaidlead,
+      raidlead: isRaidlead, // alias
+      roles: roleIds,
+      highestRole,
+    },
+    serverDisplay: displayName,
+    discordUser: {
+      id: member.user.id,
+      username: member.user.username,
+      global_name: member.user.globalName,
+      avatar: member.user.avatar,
+    },
+  };
+}
+
+/* ---- DB persist + Cookie erzeugen ---- */
+async function persistAndIssueCookie(res, discordUser, flags, serverDisplay) {
+  const userData = {
+    discordId: String(discordUser.id),
+    username: discordUser.username || null,
+    displayName: serverDisplay || discordUser.global_name || discordUser.username || null,
+    avatarUrl: discordUser.avatar ? `https://cdn.discordapp.com/avatars/${discordUser.id}/${discordUser.avatar}.png` : null,
+    rolesCsv: Array.isArray(flags.roles) ? flags.roles.join(",") : "",
+    isRaidlead: !!(flags.isRaidlead || flags.raidlead),
+    isAdmin: !!flags.isAdmin,
+    isOwner: !!flags.isOwner,
+    highestRole: flags.highestRole || null,
+  };
+
+  await prisma.user.upsert({
+    where: { discordId: userData.discordId },
+    create: userData,
+    update: userData,
+  });
+
+  const cookiePayload = {
+    id: userData.discordId,
+    username: userData.username,
+    displayName: userData.displayName,
+    avatar: discordUser.avatar || null,
+    rolesCsv: userData.rolesCsv,
+    isRaidlead: userData.isRaidlead,
+    isAdmin: userData.isAdmin,
+    isOwner: userData.isOwner,
+    highestRole: userData.highestRole,
+  };
+
+  setAuthCookie(res, cookiePayload);
+  return cookiePayload;
+}
+
+/* ---- Frontend-Komfort-Flags aus Cookie ---- */
+function buildFrontendFlags(cookiePayload) {
+  const roles = (cookiePayload.rolesCsv || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const adminLevel = !!(cookiePayload.isOwner || cookiePayload.isAdmin || (ADMIN_ROLE_ID && roles.includes(ADMIN_ROLE_ID)));
+  const canSetRaidLead = adminLevel; // nur Admin/Owner
+  const canCreateRaid =
+    adminLevel ||
+    !!cookiePayload.isRaidlead ||
+    (RAIDLEAD_ROLE_ID && roles.includes(RAIDLEAD_ROLE_ID));
+
+  return { canCreateRaid, canSetRaidLead, isAdminLevel: adminLevel };
+}
+
+/* ========================= ROUTES ========================= */
+
+/**
+ * GET /api/auth/discord?redirect=/raids
+ * Startet den OAuth-Flow (scope=identify; Rollen/Member kommen über den Bot).
+ */
+router.get("/discord", async (req, res) => {
   try {
-    if (!stateStr) return {};
-    const json = Buffer.from(stateStr, "base64url").toString("utf8");
-    return JSON.parse(json);
-  } catch {
-    return {};
+    const redirectPath = typeof req.query.redirect === "string" ? req.query.redirect : "/";
+    // CSRF-Token
+    const state = crypto.randomBytes(16).toString("hex");
+    setShortCookie(res, OAUTH_STATE_COOKIE, state);
+    setShortCookie(res, OAUTH_REDIRECT_COOKIE, redirectPath);
+
+    const params = new URLSearchParams({
+      client_id: CLIENT_ID,
+      response_type: "code",
+      scope: "identify",
+      redirect_uri: REDIRECT_URI,
+      state,
+      prompt: "none",
+    });
+    const authUrl = `https://discord.com/api/oauth2/authorize?${params.toString()}`;
+    return res.redirect(authUrl);
+  } catch (e) {
+    return res.status(500).send("OAuth init failed");
   }
-}
-function makeState(obj) {
-  return Buffer.from(JSON.stringify(obj), "utf8").toString("base64url");
-}
-
-function oauthUrl(redirect = "/") {
-  const params = new URLSearchParams({
-    client_id: DISCORD_CLIENT_ID,
-    redirect_uri: OAUTH_REDIRECT_URI,
-    response_type: "code",
-    scope: "identify guilds.members.read",
-    prompt: "none",
-    state: makeState({ redirect }),
-  });
-  return `https://discord.com/api/oauth2/authorize?${params.toString()}`;
-}
-
-async function exchangeCodeForToken(code) {
-  const body = new URLSearchParams({
-    client_id: DISCORD_CLIENT_ID,
-    client_secret: DISCORD_CLIENT_SECRET,
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: OAUTH_REDIRECT_URI,
-  });
-  const r = await fetch("https://discord.com/api/oauth2/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!r.ok) {
-    const tx = await r.text().catch(() => "");
-    throw new Error(`token_exchange_failed: ${r.status} ${tx}`);
-  }
-  return r.json();
-}
-
-async function fetchMe(accessToken) {
-  const r = await fetch("https://discord.com/api/users/@me", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!r.ok) {
-    const tx = await r.text().catch(() => "");
-    throw new Error(`me_failed: ${r.status} ${tx}`);
-  }
-  return r.json();
-}
-
-async function fetchGuildMember(accessToken) {
-  if (!GUILD_ID) return null;
-  const r = await fetch(`https://discord.com/api/users/@me/guilds/${GUILD_ID}/member`, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!r.ok) return null; // 403/404/… => not in guild
-  return r.json();
-}
-
-// ---------------- Routes ----------------
-
-/** Einstieg: Redirect zu Discord */
-router.get("/discord", (req, res) => {
-  const redirect = req.query.redirect ? String(req.query.redirect) : "/";
-  const url = oauthUrl(redirect);
-  dbg("→ redirect to", url);
-  return res.redirect(url);
 });
 
-/** Callback von Discord */
-router.get("/callback", async (req, res) => {
+/* Gemeinsamer Callback-Handler (für /discord/callback und /callback) */
+async function oauthCallbackHandler(req, res) {
   try {
     const { code, state } = req.query;
-    if (!code) return res.status(400).send("Missing code");
-    const { redirect = "/" } = parseState(state);
+    const expectedState = readShortCookie(req, OAUTH_STATE_COOKIE);
+    const redirectPath = readShortCookie(req, OAUTH_REDIRECT_COOKIE) || "/";
 
-    const tokenJson = await exchangeCodeForToken(String(code));
-    const accessToken = tokenJson.access_token;
+    if (!code || !state || !expectedState || state !== expectedState) {
+      return res.status(400).send("Invalid OAuth state");
+    }
 
-    // user info
-    const me = await fetchMe(accessToken);
-    dbg("token ok, scopes:", tokenJson.scope, "user:", me?.id, me?.global_name || me?.username);
-
-    const member = await fetchGuildMember(accessToken);
-
-    // ⚠️ WICHTIG: Live-Flags jetzt zuverlässig über Bot/Guild (Owner/Admin/Rollen)
-    // statt Access-Token, damit Owner/Role-IDs sicher stimmen.
-    const flagsResult = await getLiveRoleFlags(String(me.id), { guildId: GUILD_ID });
-    const flags = flagsResult?.flags || flagsResult || {};
-
-    // server display name (Nickname > global_name > username)
-    const serverDisplay =
-      member?.nick || me?.global_name || me?.username || null;
-
-    // DB persistieren / updaten
-    await upsertUser({
-      discordId: String(me.id),
-      username: me.username || null,
-      displayName: serverDisplay,
-      avatarUrl: me.avatar ? `https://cdn.discordapp.com/avatars/${me.id}/${me.avatar}.png` : null,
-      rolesCsv: (flags.roles || []).join(","),
-      isRaidlead: !!flags.raidlead,
+    // 1) Code -> Token
+    const tokenParams = new URLSearchParams({
+      client_id: CLIENT_ID,
+      client_secret: CLIENT_SECRET,
+      grant_type: "authorization_code",
+      code: String(code),
+      redirect_uri: REDIRECT_URI,
     });
 
-    // Cookie-Payload
-    const cookiePayload = {
-      id: String(me.id),
-      display: serverDisplay || me.username,
-      highestRole: flags.highestRole,
-      isOwner: !!flags.isOwner,
-      isAdmin: !!flags.isAdmin,
-      raidlead: !!flags.raidlead,
-      inGuild: !!flags.inGuild,
-      roles: flags.roles || [],
-    };
-    setAuthCookie(res, cookiePayload);
+    const tokenResp = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: tokenParams.toString(),
+    });
+    if (!tokenResp.ok) {
+      const t = await tokenResp.text();
+      return res.status(500).send("Token exchange failed: " + t);
+    }
+    const tokenJson = await tokenResp.json();
+    const accessToken = tokenJson.access_token;
 
-    return res.redirect(redirect || "/");
+    // 2) User holen (identify)
+    const meResp = await fetch("https://discord.com/api/users/@me", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!meResp.ok) {
+      const t = await meResp.text();
+      return res.status(500).send("Failed to fetch user: " + t);
+    }
+    const discordUser = await meResp.json(); // { id, username, global_name, avatar, ... }
+
+    // 3) Member & Flags per Bot-Client (Rollen etc.)
+    const { flags, serverDisplay } = await fetchMemberAndFlags(discordUser.id);
+
+    // 4) Persist + Cookie
+    await persistAndIssueCookie(res, discordUser, flags, serverDisplay);
+
+    // 5) Redirect zurück
+    return res.redirect(redirectPath || "/");
   } catch (e) {
-    dbg("callback_failed:", e?.message || e);
-    // fallback zurück zur Startseite
-    return res.redirect("/");
+    return res.status(500).send("OAuth callback failed: " + String(e?.message || e));
   }
-});
+}
 
-/** Wer bin ich? */
+/**
+ * GET /api/auth/discord/callback
+ * GET /api/auth/callback   (zweiter Pfad, damit deine .env mit OAUTH_REDIRECT_URI out-of-the-box passt)
+ */
+router.get("/discord/callback", oauthCallbackHandler);
+router.get("/callback", oauthCallbackHandler);
+
+/**
+ * GET /api/auth/me
+ * Liest User aus Cookie + DB und liefert Frontend-Flags.
+ * Optionaler Auto-Refresh (AUTH_REFRESH_ON_ME), um DB/Flags aktuell zu halten.
+ */
 router.get("/me", async (req, res) => {
   try {
-    const payload = verifyCookie(req.cookies?.[COOKIE_NAME]);
-    if (!payload) {
+    const payload = readCookie(req.cookies?.[COOKIE_NAME]);
+    if (!payload?.id) {
       return res.json({
         ok: true,
         user: null,
         canCreateRaid: false,
         canSetRaidLead: false,
+        isAdminLevel: false,
       });
     }
+
+    // optional „online“ aktualisieren
+    if (AUTH_REFRESH_ON_ME) {
+      try {
+        const { flags, serverDisplay, discordUser } = await fetchMemberAndFlags(String(payload.id));
+        await persistAndIssueCookie(res, discordUser, flags, serverDisplay);
+      } catch { /* still return something */ }
+    }
+
+    let dbUser = null;
+    try {
+      dbUser = await prisma.user.findUnique({
+        where: { discordId: String(payload.id) },
+        select: {
+          id: true, discordId: true, username: true, displayName: true, avatarUrl: true,
+          rolesCsv: true, isRaidlead: true, isAdmin: true, isOwner: true, highestRole: true,
+          roleLevel: true, createdAt: true, updatedAt: true,
+        },
+      });
+    } catch { /* optional */ }
+
+    const effective = readCookie(req.cookies?.[COOKIE_NAME]) || payload; // evtl. gerade erneuert
+    const flags = buildFrontendFlags(effective);
+
     return res.json({
       ok: true,
-      user: payload,
-      canCreateRaid: canCreateRaid(payload),
-      canSetRaidLead: canSetRaidLead(payload),
-      isAdminLevel: isAdminLevel(payload),
+      user: dbUser,
+      ...flags,
     });
   } catch (e) {
-    dbg("me_failed:", e?.message || e);
-    return res.json({
-      ok: true,
-      user: null,
-      canCreateRaid: false,
-      canSetRaidLead: false,
-    });
+    return res.status(500).json({ ok: false, error: "ME_FAILED", message: String(e?.message || e) });
   }
 });
 
-/** Logout */
+/**
+ * POST /api/auth/refresh
+ * Aktualisiert Rollen/Flags live über Bot (Owner/Admin/Raidlead/rolesCsv/highestRole),
+ * persistiert sie und setzt Cookie neu.
+ */
+router.post("/refresh", async (req, res) => {
+  try {
+    const payload = readCookie(req.cookies?.[COOKIE_NAME]);
+    if (!payload?.id) return res.status(401).json({ ok: false, error: "UNAUTHORIZED" });
+
+    const { flags, serverDisplay, discordUser } = await fetchMemberAndFlags(String(payload.id));
+    const newCookiePayload = await persistAndIssueCookie(res, discordUser, flags, serverDisplay);
+
+    const dbUser = await prisma.user.findUnique({ where: { discordId: String(payload.id) } });
+    return res.json({ ok: true, user: dbUser, ...buildFrontendFlags(newCookiePayload) });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: "REFRESH_FAILED", message: String(e?.message || e) });
+  }
+});
+
+/** POST /api/auth/logout */
 router.post("/logout", (req, res) => {
-  res.clearCookie(COOKIE_NAME, { path: "/" });
+  clearAuthCookie(res);
   res.json({ ok: true, message: "logged_out" });
 });
 

@@ -3,10 +3,10 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  StringSelectMenuBuilder,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
-  StringSelectMenuBuilder,
 } from "discord.js";
 import { prisma } from "../../prismaClient.js";
 import { refreshRaidMessage } from "./raidAnnounceAdapter.js";
@@ -14,42 +14,23 @@ import {
   CLASS_OPTIONS,
   ROLE_OPTIONS,
   CLASS_ROLE_MATRIX,
-  ROLE_LABELS,
 } from "./classRoleMatrix.js";
 
-/* ========= kleine Utils ========= */
+/* ===== logging ===== */
+const ENV = process.env;
+const IS_DEV = (ENV.MODE || ENV.NODE_ENV) !== "production";
 const ts = () => {
   const d = new Date();
-  return d.toLocaleTimeString("de-DE", { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3,"0");
+  return d.toLocaleTimeString("de-DE", { hour12: false }) + "." + String(d.getMilliseconds()).padStart(3, "0");
 };
-const dbg = (...a) => console.log("[SIGNUP-DBG " + ts() + "]", ...a);
-const perr = (...a) => console.log("[SIGNUP-ERR " + ts() + "]", ...a);
+const dbg  = (...a) => { if (IS_DEV) console.log("[SIGNUP-DBG " + ts() + "]", ...a); };
+const perr = (...a) => console.warn("[SIGNUP-ERR " + ts() + "]", ...a);
 
-// Compact CustomId Encoder (max 100 chars)
-function enc(parts) {
-  // su|<type>|<raidId>|<charId>|<role>|<saved>
-  return [
-    "su",
-    parts.t || "",
-    parts.raidId ?? "",
-    parts.charId ?? "",
-    parts.role ?? "",
-    parts.saved ? "1" : "0",
-  ].join("|");
-}
-function dec(id) {
-  const p = String(id || "").split("|");
-  if (p[0] !== "su") return null;
-  return {
-    t: p[1] || "",
-    raidId: p[2] ? Number(p[2]) : null,
-    charId: p[3] ? Number(p[3]) : null,
-    role: p[4] || "",
-    saved: p[5] === "1",
-  };
-}
+/* ===== utils (customId payload) ===== */
+function enc(o){ return JSON.stringify(o); }
+function dec(s){ try { return JSON.parse(s); } catch { return null; } }
 
-/* ========= Public: Buttons/Row ========= */
+/* ===== UI Components ===== */
 export function getSignupComponents(raidId) {
   const row = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
@@ -68,40 +49,65 @@ export function getSignupComponents(raidId) {
   return [row];
 }
 
+/* ===== helpers ===== */
+async function safeFindCharsByUser(userId) {
+  // robust sort: updatedAt -> id -> unsorted
+  try {
+    return await prisma.boosterChar.findMany({
+      where: { userId: String(userId) },
+      orderBy: [{ updatedAt: "asc" }],
+    });
+  } catch {
+    try {
+      return await prisma.boosterChar.findMany({
+        where: { userId: String(userId) },
+        orderBy: [{ id: "asc" }],
+      });
+    } catch {
+      return await prisma.boosterChar.findMany({
+        where: { userId: String(userId) },
+      });
+    }
+  }
+}
+
+function buildNoteModal(customId, title = "Notiz (optional)") {
+  const modal = new ModalBuilder()
+    .setCustomId(customId)
+    .setTitle(title);
+
+  const noteInput = new TextInputBuilder()
+    .setCustomId("note")
+    .setLabel("Notiz (optional)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(false)
+    .setMaxLength(200);
+
+  const row = new ActionRowBuilder().addComponents(noteInput);
+  modal.addComponents(row);
+  return modal;
+}
+
 /* ========= Interaktions-Flow ========= */
 // Schritt 1: Booster – Char wählen
 async function stepPickChar(i, raidId) {
-  const userId = String(i.user.id);
-
-  const chars = await prisma.boosterChar.findMany({
-    where: { userId },
-    orderBy: { updatedAt: "desc" },
-  });
-
+  const chars = await safeFindCharsByUser(i.user.id);
   if (!chars.length) {
-    return i.reply({
-      ephemeral: true,
-      content: "Du hast noch keine Chars importiert. Bitte zuerst unter **/chars** anlegen.",
-    });
+    return i.reply({ ephemeral: true, content: "Du hast noch keinen Charakter angelegt." });
   }
-
-  const options = chars.slice(0, 25).map((c) => ({
-    label: `${c.name}-${c.realm}${c.class ? ` (${c.class})` : ""}`,
-    value: String(c.id),
-  }));
 
   const menu = new StringSelectMenuBuilder()
     .setCustomId(enc({ t: "pick_char", raidId }))
-    .setPlaceholder("Wähle deinen Charakter")
-    .addOptions(options);
+    .setPlaceholder("Charakter wählen")
+    .addOptions(chars.slice(0, 25).map(c => ({ label: c.name || `#${c.id}`, value: String(c.id) })));
 
   const row = new ActionRowBuilder().addComponents(menu);
-  await i.reply({ ephemeral: true, content: "Charakter auswählen:", components: [row] });
+  await i.reply({ ephemeral: true, content: "Wähle deinen Charakter:", components: [row] });
 }
 
-// Schritt 2: Rolle wählen (gefiltert nach Klassenmatrix)
+// Schritt 2: Rolle wählen
 async function stepPickRole(i, raidId, charId) {
-  const char = await prisma.boosterChar.findUnique({ where: { id: charId } });
+  const char = await prisma.boosterChar.findUnique({ where: { id: Number(charId) } });
   if (!char) return i.update({ content: "Unbekannter Charakter.", components: [] });
 
   const allowedRoles = (CLASS_ROLE_MATRIX[char.class] || ["DPS"]).filter(Boolean);
@@ -131,69 +137,66 @@ async function stepPickSaved(i, raidId, charId, role) {
     ]);
 
   const row = new ActionRowBuilder().addComponents(menu);
-  await i.update({ content: "Saved-Status wählen:", components: [row] });
+  await i.update({
+    content: `Rolle: **${role}** – Saved/Unsaved?`,
+    components: [row],
+  });
 }
 
-// Schritt 4: Notiz (Modal)
-async function stepNoteModal(i, raidId, charId, role, saved) {
-  const modal = new ModalBuilder()
-    .setCustomId(enc({ t: "final_modal", raidId, charId, role, saved }))
-    .setTitle("Anmeldung – Notiz");
-
-  const note = new TextInputBuilder()
-    .setCustomId("note")
-    .setLabel("Optionale Notiz (z.B. Keys, Specs, Wünsche)")
-    .setStyle(TextInputStyle.Paragraph)
-    .setRequired(false)
-    .setMaxLength(500);
-
-  modal.addComponents(new ActionRowBuilder().addComponents(note));
-  await i.showModal(modal);
-}
-
-/* ========= DB-Aktionen ========= */
+/* ====== DB Writes ====== */
 async function createBoosterSignup({ raidId, userId, charId, role, saved, note }) {
-  // Mehrfach-Anmeldungen erlaubt — nur DUP pro (raidId,charId) blocken
+  // Doppelte (raidId,charId) ersetzen
   const existing = await prisma.signup.findFirst({
     where: { raidId, charId },
     select: { id: true },
   });
   if (existing) {
-    // Überschreiben/Update statt Fehler?
     await prisma.signup.delete({ where: { id: existing.id } });
   }
 
   const char = await prisma.boosterChar.findUnique({ where: { id: charId } });
+  const user = await prisma.user.findUnique({
+    where: { discordId: String(userId) },
+    select: { displayName: true, username: true },
+  });
+  const displayName = user?.displayName || user?.username || null;
 
+  // Achtung: kein charName-Feld im Schema -> weglassen
   await prisma.signup.create({
     data: {
       raidId,
       userId,
-      type: role,                        // "TANK" | "HEAL" | "DPS"
+      type: role,                  // "TANK" | "HEAL" | "DPS"
       charId,
-      displayName: null,
+      displayName,
       saved: !!saved,
       note: note || null,
-      class: char?.class || null,        // Snapshot
-      status: "SIGNUPED",                // Schema-Enum
+      class: char?.class || null,  // Snapshot
+      status: "SIGNUPED",
     },
   });
 
-  // Embed aktualisieren
+  // Embed aktualisieren (Adapter kann ID direkt verarbeiten)
   await refreshRaidMessage(raidId).catch(() => {});
 }
 
 async function createLootbuddySignup({ raidId, userId, pickedClass, note }) {
+  const user = await prisma.user.findUnique({
+    where: { discordId: String(userId) },
+    select: { displayName: true, username: true },
+  });
+  const displayName = user?.displayName || user?.username || null;
+
   await prisma.signup.create({
     data: {
       raidId,
       userId,
       type: "LOOTBUDDY",
       charId: null,
-      displayName: null,
+      displayName,
       saved: false,
       note: note || null,
-      class: pickedClass || null,        // Snapshot der gewählten Klasse
+      class: pickedClass || null,   // Snapshot
       status: "SIGNUPED",
     },
   });
@@ -202,11 +205,9 @@ async function createLootbuddySignup({ raidId, userId, pickedClass, note }) {
 }
 
 async function deleteOwnSignup({ raidId, userId }) {
-  // Entfernt alle eigenen Signups (Booster & Lootbuddy) für diesen Raid
-  const rows = await prisma.signup.findMany({ where: { raidId, userId } });
-  for (const r of rows) {
-    await prisma.signup.delete({ where: { id: r.id } });
-  }
+  await prisma.signup.deleteMany({
+    where: { raidId, userId },
+  });
   await refreshRaidMessage(raidId).catch(() => {});
 }
 
@@ -223,14 +224,13 @@ export function registerSignupHandlers(client) {
           return stepPickChar(i, p.raidId);
         }
         if (p.t === "start_loot") {
-          // direkt Klassen-Dropdown für Lootbuddy
+          // Klassen-Dropdown für Lootbuddy
           const menu = new StringSelectMenuBuilder()
             .setCustomId(enc({ t: "pick_lootclass", raidId: p.raidId }))
             .setPlaceholder("Wähle Lootbuddy-Klasse")
             .addOptions(CLASS_OPTIONS.slice(0, 25));
-
           const row = new ActionRowBuilder().addComponents(menu);
-          return i.reply({ ephemeral: true, content: "Lootbuddy-Klasse wählen:", components: [row] });
+          return i.reply({ ephemeral: true, content: "Wähle die Lootbuddy-Klasse:", components: [row] });
         }
         if (p.t === "start_unsub") {
           await deleteOwnSignup({ raidId: p.raidId, userId: String(i.user.id) });
@@ -247,58 +247,61 @@ export function registerSignupHandlers(client) {
           const charId = Number(i.values[0]);
           return stepPickRole(i, p.raidId, charId);
         }
+
         if (p.t === "pick_role") {
-          const role = String(i.values[0]); // TANK/HEAL/DPS
-          return stepPickSaved(i, p.raidId, p.charId, role);
+          const charId = Number(p.charId);
+          const role = String(i.values[0]);
+          return stepPickSaved(i, p.raidId, charId, role);
         }
+
         if (p.t === "pick_saved") {
-          const saved = i.values[0] === "saved";
-          return stepNoteModal(i, p.raidId, p.charId, p.role, saved);
+          const charId = Number(p.charId);
+          const role = String(p.role);
+          const saved = String(i.values[0]) === "saved";
+
+          // >>> NEU: Notiz-Modal anzeigen (statt direkt speichern)
+          const modal = buildNoteModal(
+            enc({ t: "note_booster", raidId: p.raidId, charId, role, saved }),
+            "Anmeldung – Notiz (optional)"
+          );
+          return i.showModal(modal);
         }
+
         if (p.t === "pick_lootclass") {
-          const pickedClass = i.values[0];
-          // danach Notiz-Modal
-          const modal = new ModalBuilder()
-            .setCustomId(enc({ t: "final_loot_modal", raidId: p.raidId, charId: 0, role: "LOOTBUDDY", saved: false }) + ":lc:" + pickedClass)
-            .setTitle("Lootbuddy – Notiz");
-
-          const note = new TextInputBuilder()
-            .setCustomId("note")
-            .setLabel("Optionale Notiz")
-            .setStyle(TextInputStyle.Paragraph)
-            .setRequired(false)
-            .setMaxLength(300);
-
-          modal.addComponents(new ActionRowBuilder().addComponents(note));
+          const pickedClass = String(i.values[0]);
+          // >>> NEU: Notiz-Modal für Lootbuddy
+          const modal = buildNoteModal(
+            enc({ t: "note_loot", raidId: p.raidId, pickedClass }),
+            "Lootbuddy – Notiz (optional)"
+          );
           return i.showModal(modal);
         }
       }
 
       // MODALS
       if (i.isModalSubmit()) {
-        const cid = String(i.customId);
-        if (cid.startsWith("su|final_modal|")) {
-          const p = dec(cid);
-          const note = i.fields.getTextInputValue("note")?.trim() || "";
+        const p = dec(i.customId);
+        if (!p) return;
+
+        if (p.t === "note_booster") {
+          const note = (i.fields.getTextInputValue("note") || "").trim() || null;
           await createBoosterSignup({
             raidId: p.raidId,
             userId: String(i.user.id),
-            charId: p.charId,
-            role: p.role,
-            saved: p.saved,
+            charId: Number(p.charId),
+            role: String(p.role),
+            saved: !!p.saved,
             note,
           });
           return i.reply({ ephemeral: true, content: "✅ Anmeldung gespeichert." });
         }
-        if (cid.startsWith("su|final_loot_modal|")) {
-          // Klasse hängt hinter ":lc:" dran (damit CustomId < 100 bleibt)
-          const [idPart, cls] = cid.split(":lc:");
-          const p = dec(idPart);
-          const note = i.fields.getTextInputValue("note")?.trim() || "";
+
+        if (p.t === "note_loot") {
+          const note = (i.fields.getTextInputValue("note") || "").trim() || null;
           await createLootbuddySignup({
             raidId: p.raidId,
             userId: String(i.user.id),
-            pickedClass: cls || null,
+            pickedClass: String(p.pickedClass),
             note,
           });
           return i.reply({ ephemeral: true, content: "✅ Lootbuddy-Anmeldung gespeichert." });
