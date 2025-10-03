@@ -187,27 +187,21 @@ async function createCore(req, res) {
   // ---- Lead nur Admin/Owner frei wählbar ----
   const canPickLead = isAdminLevel(u);
 
-  // Wenn NICHT Admin-Level: eingehende Lead-Felder rigoros ignorieren & überschreiben
-  const incomingLeadId = (typeof p.leadId === "string" ? p.leadId : (typeof p.lead === "string" ? p.lead : null));
-  if (!canPickLead && (p.lead || p.leadId || p.leadName)) {
-    dbg("lead_override(non-admin): ignoring provided lead", { provided: { lead: p.lead, leadId: p.leadId, leadName: p.leadName }, user: u?.discordId });
-    delete p.lead;
-    delete p.leadId;
-    delete p.leadName;
-  }
-
-  const looksLikeId = (s) => typeof s === "string" && /^[0-9]{16,20}$/.test(s);
+  // leadId/lead aus Payload nur akzeptieren, wenn Admin/Owner.
+  // Andernfalls überschreiben wir auf den aktuellen User.
   let enforcedLeadId = null;
-  let enforcedLeadDisplay = null;
-
   if (canPickLead) {
-    // Admin/Owner dürfen setzen → akzeptiere leadId (oder lead wenn es wie ID aussieht)
-    enforcedLeadId = incomingLeadId && looksLikeId(incomingLeadId) ? String(incomingLeadId) : null;
+    const looksLikeId = (s) => typeof s === "string" && /^[0-9]{16,20}$/.test(s);
+    enforcedLeadId = p.leadId ? String(p.leadId) : (looksLikeId(p.lead) ? String(p.lead) : null);
   } else {
-    // Raidlead (ohne Admin): immer selbst
     enforcedLeadId = String(u.discordId);
-    enforcedLeadDisplay = u?.displayName || u?.username || null;
   }
+
+  // hübscher Displayname (nur für Embed/Antwort)
+  const enforcedLeadDisplay =
+    (u?.displayName || u?.username) && !canPickLead
+      ? (u.displayName || u.username)
+      : null;
 
   const bosses = toBosses(p);
 
@@ -349,13 +343,7 @@ async function createCore(req, res) {
   }
 
   // Antwort so formen, dass `lead` = Displayname ist
-  const resp = await shapeForResponse(created);
-  return res.json({
-    ok: true,
-    raid: resp,
-    // kleiner Hinweis für das Frontend, um das Dropdown auszublenden:
-    permissions: { canPickLead: isAdminLevel(u) }
-  });
+  return res.json({ ok: true, raid: await shapeForResponse(created) });
 }
 
 // POST /api/raids

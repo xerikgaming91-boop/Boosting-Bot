@@ -53,12 +53,28 @@ export default function RaidsPage() {
     setTitle(parts.filter(Boolean).join(" "));
   }, [diff, loot]);
 
+  // NOTE: Nur Admin/Owner dürfen den Lead frei wählen
+  const canPickLead = useMemo(() => {
+    return !!(user?.isOwner || user?.isAdmin);
+  }, [user]);
+
+  // NOTE: Für Admin/Owner: wenn Liste da und nichts gewählt, erstes Element vorauswählen
+  useEffect(() => {
+    if (canPickLead && leads.length > 0 && !leadId) {
+      setLeadId(String(leads[0].id));
+    }
+  }, [canPickLead, leads, leadId]);
+
   const canCreate = useMemo(() => {
     if (!user) return false;
-    if (!(user.isRaidlead || user.raidlead || user.isAdmin || user.isOwner)) return false;
-    if (!leadId) return false;
+    const hasCreateRight = (user.isRaidlead || user.raidlead || user.isAdmin || user.isOwner);
+    if (!hasCreateRight) return false;
+    // NOTE: Nur Admin/Owner brauchen eine Lead-Auswahl; normale RL nicht
+    if (canPickLead) {
+      return !!leadId;
+    }
     return true;
-  }, [user, leadId]);
+  }, [user, leadId, canPickLead]);
 
   async function onCreate() {
     setMsg(null);
@@ -70,10 +86,14 @@ export default function RaidsPage() {
         difficulty: diff,
         lootType: loot,
         presetId: presetId || null,
-        leadId,
         date: when.toISOString(),
         bosses: BOSS_COUNT_BY_DIFF[diff] ?? 8, // <-- wichtig für Prisma
       };
+
+      // NOTE: leadId NUR mitsenden, wenn Admin/Owner
+      if (canPickLead && leadId) {
+        payload.leadId = String(leadId);
+      }
 
       await RaidsAPI.create(payload);
       setMsg({ t: "ok", m: "Raid erstellt." });
@@ -158,15 +178,18 @@ export default function RaidsPage() {
             </select>
           </div>
 
-          <div>
-            <label className="text-xs text-slate-400">Raid Lead (aus Server)</label>
-            <select className={cls("w-full mt-1 rounded-md bg-slate-800 border px-3 py-2 text-slate-200", "border-slate-700")}
-              value={leadId} onChange={(e) => setLeadId(e.target.value)}>
-              <option value="">— auswählen —</option>
-              {leads.map((u) => <option key={u.id} value={u.id}>{u.displayName}</option>)}
-            </select>
-            <p className="text-xs text-slate-500 mt-1">Nur Nutzer mit Raidlead- oder Admin-Rechten werden hier angezeigt.</p>
-          </div>
+          {/* NOTE: Raidlead-Select nur für Admin/Owner sichtbar */}
+          {canPickLead && (
+            <div>
+              <label className="text-xs text-slate-400">Raid Lead (aus Server)</label>
+              <select className={cls("w-full mt-1 rounded-md bg-slate-800 border px-3 py-2 text-slate-200", "border-slate-700")}
+                value={leadId} onChange={(e) => setLeadId(e.target.value)}>
+                <option value="">— auswählen —</option>
+                {leads.map((u) => <option key={u.id} value={u.id}>{u.displayName}</option>)}
+              </select>
+              <p className="text-xs text-slate-500 mt-1">Nur Nutzer mit Raidlead- oder Admin-Rechten werden hier angezeigt.</p>
+            </div>
+          )}
 
           <div>
             <label className="text-xs text-slate-400">Preset</label>
