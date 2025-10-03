@@ -15,6 +15,7 @@ const COOKIE_SECRET    = ENV.JWT_Secret || ENV.COOKIE_SECRET || "dev-secret-fall
 const RAIDLEAD_ROLE_ID = ENV.RAIDLEAD_ROLE_ID || ENV.DISCORD_ROLE_RAIDLEAD_ID || ENV.DISCORD_ROLE_RAIDLEAD || "";
 const ADMIN_ROLE_ID    = ENV.DISCORD_ROLE_ADMIN_ID || ENV.ADMIN_ROLE_ID || "";
 const IS_PROD          = (ENV.MODE || ENV.NODE_ENV) === "production";
+
 const GUILD_ID         = ENV.DISCORD_GUILD_ID || ENV.GUILD_ID || "";
 
 const DATA_FILE        = path.resolve(process.cwd(), "dev-raids.json");
@@ -45,28 +46,20 @@ function getUser(req) {
   const raw = req.cookies?.[COOKIE_NAME];
   return verifyToken(raw);
 }
-function userHasRole(u, roleId) {
-  if (!u || !roleId) return false;
+function userCanCreate(u) {
+  if (!u) return false;
+  if (u.isOwner || u.isAdmin || u.isRaidlead || u.raidlead) return true;
   const roles = Array.isArray(u.roles) ? u.roles : [];
-  return roles.includes(roleId);
+  if (ADMIN_ROLE_ID && roles.includes(ADMIN_ROLE_ID)) return true;
+  if (RAIDLEAD_ROLE_ID && roles.includes(RAIDLEAD_ROLE_ID)) return true;
+  return false;
 }
-function isOwner(u) {
-  return !!u?.isOwner;
-}
-/** Nur echte Admins: Owner ODER ADMIN_ROLE_ID. (u.isAdmin-Flag wird ignoriert) */
 function isAdminLevel(u) {
   if (!u) return false;
-  if (isOwner(u)) return true;
-  return userHasRole(u, ADMIN_ROLE_ID);
-}
-function isRaidleadLevel(u) {
-  if (!u) return false;
-  if (isAdminLevel(u)) return true;
-  return userHasRole(u, RAIDLEAD_ROLE_ID) || !!u.isRaidlead || !!u.raidlead;
-}
-function userCanCreate(u) {
-  // Raids erstellen darf: Admin/Owner/Raidlead
-  return isRaidleadLevel(u);
+  if (u.isOwner || u.isAdmin) return true;
+  const roles = Array.isArray(u.roles) ? u.roles : [];
+  if (ADMIN_ROLE_ID && roles.includes(ADMIN_ROLE_ID)) return true;
+  return false;
 }
 
 /* -------------------- prisma / fallback -------------------- */
@@ -91,11 +84,13 @@ function normalizeRaid(r) {
     difficulty: r.difficulty || r.diff || "",
     lootType: r.lootType || r.loot || "",
     date: r.date || r.when || r.datetime || null,
-    // lead (im DB-Feld: Displayname!)
-    lead: r.lead ?? null,
+    // Lead Info (DB/Legacy)
+    leadId: r.leadId || null,      // legacy, falls vorhanden
+    leadName: r.leadName || null,  // legacy, falls vorhanden
+    lead: r.lead || null,          // DB-Feld (bei dir: String = Discord-ID oder null)
     // Preset/Relation
     presetId: r.presetId ?? r.preset ?? null,
-    // Optionales Schema-Zeug:
+    // Optional:
     bosses: typeof r.bosses === "number" ? r.bosses : null,
     channelId: r.channelId || null,
     messageId: r.messageId || null,
@@ -115,9 +110,6 @@ function toBosses(p) {
   const d = String(p.difficulty || "");
   return DEFAULT_BOSSES_BY_DIFF[d] ?? 8;
 }
-function looksLikeDiscordId(s) {
-  return typeof s === "string" && /^[0-9]{16,20}$/.test(s);
-}
 
 /** Discord-Displayname eines Users auf dem Server (Nickname > global_name > username). */
 async function resolveServerDisplay(userId) {
@@ -125,61 +117,38 @@ async function resolveServerDisplay(userId) {
   try {
     const cli = await ensureBotReady();
     if (!cli) return null;
-    const m = await cli.guilds.fetch(GUILD_ID).then(g => g.members.fetch(String(userId)));
+    const m = await cli.guilds.fetch(GUILD_ID).then(g => g.members.fetch(userId));
     return m?.nickname || m?.user?.globalName || m?.user?.username || null;
   } catch {
     return null;
   }
 }
 
-/** Response-Objekt für API formen (lead = Displayname, detailUrl dabei) */
-function shapeForResponse(row) {
-  const n = normalizeRaid(row);
-  return {
-    ...n,
-    detailUrl: n.id != null ? `/raids/${n.id}` : null,
-  };
+/** Displayname für eine leadId bestimmen (User-DB → Discord) */
+async function displayForLead(leadId) {
+  if (!leadId) return null;
+  try {
+    const u = await prisma.user.findUnique({
+      where: { discordId: String(leadId) },
+      select: { displayName: true, username: true },
+    });
+    if (u) return u.displayName || u.username || null;
+  } catch {}
+  return await resolveServerDisplay(String(leadId));
 }
 
-/**
- * Ermittelt finalen Lead (ID + Displayname).
- * Policy:
- * - Admin/Owner: darf p.leadId / p.lead (ID) setzen; fällt sonst auf eigenen User zurück.
- * - Nicht-Admin (inkl. Raidlead): immer eigener User; p.lead/leadId werden ignoriert.
- */
-async function resolveLeadForCreate(reqUser, payload) {
-  let finalLeadId = null;
-  let finalLeadDisplay = null;
-
-  if (isAdminLevel(reqUser)) {
-    // Admin darf setzen
-    const candidateId =
-      (looksLikeDiscordId(payload?.leadId) && String(payload.leadId)) ||
-      (looksLikeDiscordId(payload?.lead)   && String(payload.lead))   ||
-      (reqUser?.discordId && String(reqUser.discordId)) ||
-      (reqUser?.id && String(reqUser.id)) ||
-      null;
-    finalLeadId = candidateId;
-    finalLeadDisplay =
-      payload?.leadName ||
-      (candidateId && await resolveServerDisplay(candidateId)) ||
-      reqUser?.displayName || reqUser?.username || null;
-  } else {
-    // Nicht-Admin: immer self
-    const selfId = (reqUser?.discordId && String(reqUser.discordId)) || (reqUser?.id && String(reqUser.id)) || null;
-    if (!selfId) {
-      dbg("lead_override(non-admin): missing selfId -> will store only displayName null");
-    }
-    finalLeadId = selfId;
-    finalLeadDisplay =
-      (selfId && await resolveServerDisplay(selfId)) ||
-      reqUser?.displayName || reqUser?.username || null;
-    if (payload?.lead || payload?.leadId || payload?.leadName) {
-      dbg("lead_override(non-admin): ignoring provided lead", { provided: { lead: payload?.lead, leadId: payload?.leadId, leadName: payload?.leadName }, user: { id: reqUser?.id, discordId: reqUser?.discordId } });
-    }
-  }
-
-  return { finalLeadId, finalLeadDisplay };
+/** Response-Objekt so formen, dass `lead` der Displayname ist */
+async function shapeForResponse(row) {
+  const n = normalizeRaid(row);
+  const leadId = n.lead || n.leadId || null;         // DB speichert in `lead` die ID
+  const leadDisplay = (await displayForLead(leadId)) || n.leadName || null;
+  return {
+    ...n,
+    leadId: leadId || null,                           // ID separat
+    leadName: leadDisplay || (leadId ?? null),        // Alias
+    lead: leadDisplay || (leadId ?? null),            // für /raids = Displayname
+    detailUrl: n.id != null ? `/raids/${n.id}` : null,
+  };
 }
 
 /* -------------------- routes -------------------- */
@@ -190,11 +159,15 @@ router.get("/", async (_req, res) => {
     const model = getPrismaModel();
     if (model) {
       const rows = await model.findMany({ orderBy: [{ date: "desc" }] });
-      return res.json(rows.map(shapeForResponse));
+      const out = [];
+      for (const r of rows) out.push(await shapeForResponse(r));
+      return res.json(out);
     }
     const list = await jsonRead();
     list.sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")));
-    return res.json(list.map(shapeForResponse));
+    const out = [];
+    for (const r of list) out.push(await shapeForResponse(r));
+    return res.json(out);
   } catch (e) {
     dbg("list_error:", e?.message || e);
     res.status(500).json({ ok:false, error:"LIST_FAILED", message:e?.message || "unknown" });
@@ -211,16 +184,40 @@ async function createCore(req, res) {
   const p = req.body || {};
   validateCreatePayload(p);
 
-  const { finalLeadId, finalLeadDisplay } = await resolveLeadForCreate(u, p);
+  // ---- Lead nur Admin/Owner frei wählbar ----
+  const canPickLead = isAdminLevel(u);
+
+  // Wenn NICHT Admin-Level: eingehende Lead-Felder rigoros ignorieren & überschreiben
+  const incomingLeadId = (typeof p.leadId === "string" ? p.leadId : (typeof p.lead === "string" ? p.lead : null));
+  if (!canPickLead && (p.lead || p.leadId || p.leadName)) {
+    dbg("lead_override(non-admin): ignoring provided lead", { provided: { lead: p.lead, leadId: p.leadId, leadName: p.leadName }, user: u?.discordId });
+    delete p.lead;
+    delete p.leadId;
+    delete p.leadName;
+  }
+
+  const looksLikeId = (s) => typeof s === "string" && /^[0-9]{16,20}$/.test(s);
+  let enforcedLeadId = null;
+  let enforcedLeadDisplay = null;
+
+  if (canPickLead) {
+    // Admin/Owner dürfen setzen → akzeptiere leadId (oder lead wenn es wie ID aussieht)
+    enforcedLeadId = incomingLeadId && looksLikeId(incomingLeadId) ? String(incomingLeadId) : null;
+  } else {
+    // Raidlead (ohne Admin): immer selbst
+    enforcedLeadId = String(u.discordId);
+    enforcedLeadDisplay = u?.displayName || u?.username || null;
+  }
+
   const bosses = toBosses(p);
 
-  // DB-Feld lead = Displayname (wie gewünscht)
-  const dataForDb = {
+  // **Nur Schema-Felder an Prisma**; `lead` = Discord-ID (oder null)
+  const baseDataBoth = {
     title: p.title,
     difficulty: p.difficulty,
     lootType: p.lootType,
     date: p.date,
-    lead: finalLeadDisplay ?? null, // Displayname speichern
+    lead: enforcedLeadId || null,  // DB speichert ID
     bosses,
   };
 
@@ -237,27 +234,73 @@ async function createCore(req, res) {
     const tryCreate = async (data) => model.create({ data });
 
     try {
-      created = await tryCreate(withPreset(dataForDb));
+      created = await tryCreate(withPreset(baseDataBoth));
       createdId = created?.id || null;
     } catch (e) {
-      // tolerante Fallbacks, falls Schema in deiner DB temporär anders ist
-      let lastErr = e;
-      try {
-        const { preset, ...noPreset } = withPreset(dataForDb);
-        created = await tryCreate(noPreset);
-        createdId = created?.id || null;
-        lastErr = null;
-      } catch (e2) { lastErr = e2; }
-      if (lastErr) {
-        dbg("prisma:error create_failed\n" + lastErr);
-        throw lastErr;
+      let msg = String(e?.message || "");
+      dbg("prisma:error \n" + e);
+
+      if (/Unknown arg `preset`/i.test(msg)) {
+        try {
+          const { preset, ...noPreset } = withPreset(baseDataBoth);
+          created = await tryCreate(noPreset);
+          createdId = created?.id || null;
+        } catch (e2) {
+          msg = String(e2?.message || "");
+          dbg("prisma:error noPreset\n" + e2);
+          if (/Unknown arg `bosses`/i.test(msg)) {
+            const { bosses, ...np } = withPreset(baseDataBoth);
+            created = await tryCreate(np);
+            createdId = created?.id || null;
+          } else if (/Unknown arg `lead`/i.test(msg)) {
+            const { lead, ...np } = withPreset(baseDataBoth);
+            created = await tryCreate(np);
+            createdId = created?.id || null;
+          } else {
+            throw e2;
+          }
+        }
+      } else if (/Unknown arg `bosses`/i.test(msg)) {
+        const { bosses, ...noBosses } = withPreset(baseDataBoth);
+        try {
+          created = await tryCreate(noBosses);
+          createdId = created?.id || null;
+        } catch (e3) {
+          msg = String(e3?.message || "");
+          dbg("prisma:error noBosses\n" + e3);
+          if (/Unknown arg `lead`/i.test(msg)) {
+            const { lead, ...rest } = noBosses;
+            created = await tryCreate(rest);
+            createdId = created?.id || null;
+          } else {
+            throw e3;
+          }
+        }
+      } else if (/Unknown arg `lead`/i.test(msg)) {
+        const { lead, ...noLead } = withPreset(baseDataBoth);
+        try {
+          created = await tryCreate(noLead);
+          createdId = created?.id || null;
+        } catch (e5) {
+          msg = String(e5?.message || "");
+          dbg("prisma:error noLead\n" + e5);
+          if (/Unknown arg `bosses`/i.test(msg)) {
+            const { bosses, ...rest } = noLead;
+            created = await tryCreate(rest);
+            createdId = created?.id || null;
+          } else {
+            throw e5;
+          }
+        }
+      } else {
+        throw e;
       }
     }
   } else {
     // JSON-Fallback
     const row = {
       id: crypto.randomUUID(),
-      ...dataForDb,
+      ...baseDataBoth,
       presetId: p.presetId ?? null,
     };
     const list = await jsonRead();
@@ -269,31 +312,34 @@ async function createCore(req, res) {
 
   const normalized = normalizeRaid(created);
 
-  // ---- Discord-Announcement (nutzt finalLeadId + finalLeadDisplay) ----
+  // ---- Discord-Announcement ----
   try {
     const { channelId, messageId } = await announceRaid({
       ...normalized,
       presetId: p.presetId ?? normalized.presetId ?? null,
-      leadId: finalLeadId || null,                 // <- ID nur fürs Embed/Posting
-      leadName: finalLeadDisplay || normalized.lead || null, // hübscher Name fürs Embed
+      // Embed-Name hübsch machen
+      leadName:
+        enforcedLeadDisplay ||
+        (await displayForLead(normalized.lead)) ||
+        normalized.lead ||
+        null,
+      leadId: normalized.lead || null,
     });
 
-    // Backwrite channel/message IDs
     if ((channelId || messageId) && createdId) {
-      const model2 = getPrismaModel();
-      if (model2) {
-        const updates = {};
-        if (channelId) updates.channelId = channelId;
-        if (messageId) updates.messageId = messageId;
-        if (Object.keys(updates).length) {
-          try { await model2.update({ where: { id: createdId }, data: updates }); } catch {}
-        }
+      const model = getPrismaModel();
+      if (model) {
+        const tryUpdate = async (data) => {
+          try { await model.update({ where: { id: createdId }, data }); return true; } catch { return false; }
+        };
+        if (channelId) await tryUpdate({ channelId });
+        if (messageId) await tryUpdate({ messageId });
       } else {
         const list = await jsonRead();
         const idx = list.findIndex((x) => x.id === createdId);
         if (idx >= 0) {
-          if (channelId) list[idx].channelId = channelId;
-          if (messageId) list[idx].messageId = messageId;
+          list[idx].channelId = channelId || list[idx].channelId || null;
+          list[idx].messageId = messageId || list[idx].messageId || null;
           await jsonWrite(list);
         }
       }
@@ -302,7 +348,14 @@ async function createCore(req, res) {
     dbg("announce failed (ignored):", String(e?.message || e));
   }
 
-  return res.json({ ok: true, raid: shapeForResponse(created) });
+  // Antwort so formen, dass `lead` = Displayname ist
+  const resp = await shapeForResponse(created);
+  return res.json({
+    ok: true,
+    raid: resp,
+    // kleiner Hinweis für das Frontend, um das Dropdown auszublenden:
+    permissions: { canPickLead: isAdminLevel(u) }
+  });
 }
 
 // POST /api/raids
@@ -335,12 +388,12 @@ router.get("/:id", async (req, res) => {
     if (model) {
       const r = await model.findUnique({ where: { id: idNum } });
       if (!r) return res.status(404).json({ ok:false, error:"NOT_FOUND" });
-      return res.json({ ok:true, raid: shapeForResponse(r) });
+      return res.json({ ok:true, raid: await shapeForResponse(r) });
     }
     const list = await jsonRead();
     const r = list.find(x => String(x.id) === String(req.params.id));
     if (!r) return res.status(404).json({ ok:false, error:"NOT_FOUND" });
-    return res.json({ ok:true, raid: shapeForResponse(r) });
+    return res.json({ ok:true, raid: await shapeForResponse(r) });
   } catch (e) {
     dbg("detail_error:", e?.message || e);
     res.status(500).json({ ok:false, error:"DETAIL_FAILED", message:e?.message || "unknown" });

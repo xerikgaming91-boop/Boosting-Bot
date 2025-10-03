@@ -153,7 +153,11 @@ router.get("/callback", async (req, res) => {
     dbg("token ok, scopes:", tokenJson.scope, "user:", me?.id, me?.global_name || me?.username);
 
     const member = await fetchGuildMember(accessToken);
-    const flags = await getLiveRoleFlags(accessToken);
+
+    // ⚠️ WICHTIG: Live-Flags jetzt zuverlässig über Bot/Guild (Owner/Admin/Rollen)
+    // statt Access-Token, damit Owner/Role-IDs sicher stimmen.
+    const flagsResult = await getLiveRoleFlags(String(me.id), { guildId: GUILD_ID });
+    const flags = flagsResult?.flags || flagsResult || {};
 
     // server display name (Nickname > global_name > username)
     const serverDisplay =
@@ -169,7 +173,7 @@ router.get("/callback", async (req, res) => {
       isRaidlead: !!flags.raidlead,
     });
 
-    // Cookie-Payload (kompatibel zu raids.js-Checks)
+    // Cookie-Payload
     const cookiePayload = {
       id: String(me.id),
       display: serverDisplay || me.username,
