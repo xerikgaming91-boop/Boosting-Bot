@@ -1,39 +1,73 @@
-// /src/backend/utils/jwt.js
-import crypto from 'node:crypto';
+// src/backend/utils/jwt.js
+import jwt from "jsonwebtoken";
+import { dbgAuth, isDebugAuth } from "./debug.js";
 
-const COOKIE = process.env.JWT_COOKIE_NAME || 'auth';
-const SECRET = process.env.JWT_Secret || 'dev_secret';
+const {
+  JWT_Secret = "dev_secret_change_me",
+  JWT_COOKIE_NAME = "auth",
+  NODE_ENV = "development",
+} = process.env;
 
-function b64url(x) { return Buffer.from(x).toString('base64url'); }
+const isProd = NODE_ENV === "production";
 
-export function signJwt(payload, expSeconds = 60 * 60 * 24 * 7) {
-  const header = { alg: 'HS256', typ: 'JWT' };
-  const now = Math.floor(Date.now() / 1000);
-  const body = { iat: now, exp: now + expSeconds, ...payload };
-  const h = b64url(JSON.stringify(header));
-  const p = b64url(JSON.stringify(body));
-  const sig = crypto.createHmac('sha256', SECRET).update(`${h}.${p}`).digest('base64url');
-  return `${h}.${p}.${sig}`;
+export function setUserToken(res, payload) {
+  const token = jwt.sign(payload, JWT_Secret, { expiresIn: "30d" });
+  const cookieOpts = {
+    httpOnly: true,
+    secure: isProd,  // in dev=false
+    sameSite: "lax", // wichtig für OAuth-Redirect
+    path: "/",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  };
+  res.cookie(JWT_COOKIE_NAME, token, cookieOpts);
+
+  if (isDebugAuth()) {
+    // Set-Cookie wird erst nach send()/redirect() in den Header geschrieben,
+    // res.getHeaders() sieht es in Express schon jetzt.
+    const setCookie = res.getHeaders()["set-cookie"];
+    dbgAuth("setUserToken(): cookie gesetzt", {
+      name: JWT_COOKIE_NAME,
+      options: cookieOpts,
+      "res.set-cookie": setCookie,
+      payloadPreview: {
+        id: payload?.id,
+        username: payload?.username,
+        displayName: payload?.displayName,
+        isRaidlead: payload?.isRaidlead,
+      },
+    });
+  }
 }
 
-export function verifyJwt(token) {
+export function clearUserToken(res) {
+  const cookieOpts = {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: "lax",
+    path: "/",
+    maxAge: 0,
+  };
+  res.cookie(JWT_COOKIE_NAME, "", cookieOpts);
+  dbgAuth("clearUserToken(): cookie gelöscht", { name: JWT_COOKIE_NAME, options: cookieOpts });
+}
+
+export async function getUserFromReq(req) {
   try {
-    const [h, p, s] = token.split('.');
-    const expected = crypto.createHmac('sha256', SECRET).update(`${h}.${p}`).digest('base64url');
-    if (s !== expected) return null;
-    const obj = JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
-    if (obj.exp && Math.floor(Date.now() / 1000) > obj.exp) return null;
-    return obj;
-  } catch { return null; }
-}
-
-export function setAuthCookie(res, jwt) {
-  res.cookie(COOKIE, jwt, { httpOnly: true, sameSite: 'lax', secure: false, path: '/', maxAge: 1000*60*60*24*7 });
-}
-export function clearAuthCookie(res) { res.clearCookie(COOKIE, { path: '/' }); }
-
-export function getUserFromReq(req) {
-  const token = req.cookies?.[COOKIE];
-  if (!token) return null;
-  return verifyJwt(token);
+    const token = req.cookies?.[JWT_COOKIE_NAME];
+    if (!token) {
+      dbgAuth("getUserFromReq(): KEIN Cookie gefunden");
+      return null;
+    }
+    const data = jwt.verify(token, JWT_Secret);
+    dbgAuth("getUserFromReq(): token ok → user", {
+      id: data?.id,
+      username: data?.username,
+      displayName: data?.displayName,
+      isRaidlead: data?.isRaidlead,
+    });
+    return data || null;
+  } catch (e) {
+    dbgAuth("getUserFromReq(): verify error", e?.message || String(e));
+    return null;
+  }
 }

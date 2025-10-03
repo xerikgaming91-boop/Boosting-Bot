@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { AuthAPI } from "../../api.js";
 
 export default function Chars() {
   const [auth, setAuth] = useState({ loading: true, loggedIn: false, user: null });
@@ -12,23 +13,20 @@ export default function Chars() {
 
   useEffect(() => {
     (async () => {
-      try {
-        const r = await fetch("/api/auth/me", { credentials: "include" });
-        const j = await r.json();
-        if (j?.ok && j.user) setAuth({ loading: false, loggedIn: true, user: j.user });
-        else setAuth({ loading: false, loggedIn: false, user: null });
-      } catch {
-        setAuth({ loading: false, loggedIn: false, user: null });
-      }
+      const j = await AuthAPI.me();
+      if (j?.ok && j.user) setAuth({ loading: false, loggedIn: true, user: j.user });
+      else setAuth({ loading: false, loggedIn: false, user: null });
     })();
   }, []);
 
   async function loadMine() {
     try {
-      const r = await fetch("/api/chars/mine", { credentials: "include" });
+      const r = await fetch(`http://localhost:4000/api/chars/mine`, { credentials: "include" });
       const j = await r.json();
       setList(j?.chars ?? []);
-    } catch { setList([]); }
+    } catch {
+      setList([]);
+    }
   }
 
   useEffect(() => { if (auth.loggedIn) loadMine(); }, [auth.loggedIn]); // eslint-disable-line
@@ -37,7 +35,7 @@ export default function Chars() {
     e.preventDefault();
     setBusy(true); setErr("");
     try {
-      const r = await fetch("/api/chars/import", {
+      const r = await fetch(`http://localhost:4000/api/chars/import`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
@@ -45,28 +43,34 @@ export default function Chars() {
       });
       const j = await r.json();
       if (!r.ok || j?.error) throw new Error(j?.detail || j?.error || "Import fehlgeschlagen");
-      setName(""); setRealm(""); await loadMine();
-    } catch (e) {
-      setErr(e?.message || "Import fehlgeschlagen");
-    } finally { setBusy(false); }
+      setName(""); setRealm("");
+      await loadMine();
+    } catch (e2) {
+      setErr(e2?.message || "Import fehlgeschlagen");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function onDelete(id) {
     if (!confirm("Char wirklich löschen?")) return;
-    try { await fetch(`/api/chars/${id}`, { method: "DELETE", credentials: "include" }); await loadMine(); } catch {}
+    try {
+      await fetch(`http://localhost:4000/api/chars/${id}`, { method: "DELETE", credentials: "include" });
+      await loadMine();
+    } catch {}
   }
 
   if (auth.loading) return <div className="p-6 text-slate-300">Lade…</div>;
   if (!auth.loggedIn) {
     return (
       <div className="p-6">
-        <div className="panel max-w-3xl mx-auto">
+        <div className="panel max-w-5xl mx-auto">{/* <-- auf 5xl */}
           <div className="panel-body flex items-center justify-between">
             <div>
               <div className="text-slate-200 font-semibold">Nicht angemeldet</div>
               <div className="text-slate-400 text-sm">Melde dich an, um Booster-Chars zu importieren.</div>
             </div>
-            <a className="btn btn-primary" href="/api/auth/discord">Mit Discord anmelden</a>
+            <a className="btn btn-primary" href={AuthAPI.loginUrl()}>Login</a>
           </div>
         </div>
       </div>
@@ -75,14 +79,25 @@ export default function Chars() {
 
   return (
     <div className="p-6 space-y-6">
-      <div className="panel max-w-3xl mx-auto">
+      {/* Import-Box — jetzt gleiche Breite wie die Tabelle */}
+      <div className="panel max-w-5xl mx-auto">{/* <-- vorher max-w-3xl */}
         <div className="panel-head">Booster-Char importieren</div>
         <div className="panel-body">
           <form onSubmit={onImport} className="grid grid-cols-1 md:grid-cols-4 gap-3">
-            <input className="input md:col-span-2" placeholder="Char-Name (z. B. Thrall)"
-                   value={name} onChange={(e)=>setName(e.target.value)} required />
-            <input className="input" placeholder="Realm (z. B. Silvermoon)"
-                   value={realm} onChange={(e)=>setRealm(e.target.value)} required />
+            <input
+              className="input md:col-span-2"
+              placeholder="Char-Name (z. B. Thrall)"
+              value={name}
+              onChange={(e)=>setName(e.target.value)}
+              required
+            />
+            <input
+              className="input"
+              placeholder="Realm (z. B. Silvermoon)"
+              value={realm}
+              onChange={(e)=>setRealm(e.target.value)}
+              required
+            />
             <select className="select" value={region} onChange={(e)=>setRegion(e.target.value)}>
               {["EU","US","KR","TW","CN"].map(r => <option key={r} value={r}>{r}</option>)}
             </select>
@@ -97,6 +112,7 @@ export default function Chars() {
         </div>
       </div>
 
+      {/* Liste – unverändert max-w-5xl */}
       <div className="panel max-w-5xl mx-auto">
         <div className="panel-head">Meine Booster-Chars</div>
         <div className="panel-body overflow-x-auto">

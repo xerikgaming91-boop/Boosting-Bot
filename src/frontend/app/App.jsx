@@ -1,12 +1,11 @@
-import React from "react";
+import React from "react";                   // <— WICHTIG
 import { Routes, Route, Navigate } from "react-router-dom";
 
 import Layout from "./components/Layout.jsx";
-
 import Raids from "./pages/Raids.jsx";
+import RaidDetail from "./pages/RaidDetail.jsx";
 import Chars from "./pages/Chars.jsx";
 import Presets from "./pages/Presets.jsx";
-import RaidDetail from "./pages/RaidDetail.jsx";
 import Users from "./pages/Users.jsx";
 
 export default function App() {
@@ -19,8 +18,8 @@ export default function App() {
         <Route path="/chars" element={<Chars />} />
         <Route path="/presets" element={<Presets />} />
         <Route path="/users" element={<Users />} />
-        <Route path="*" element={<Navigate to="/raids" replace />} />
       </Route>
+      <Route path="*" element={<Navigate to="/raids" replace />} />
     </Routes>
   );
 }

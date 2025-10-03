@@ -4,9 +4,9 @@ import Navigation from "./Navigation.jsx";
 
 export default function Layout() {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100">
+    <div className="min-h-screen bg-slate-950 text-slate-200">
       <Navigation />
-      <main className="mx-auto max-w-6xl px-4 py-6">
+      <main className="py-6">
         <Outlet />
       </main>
     </div>

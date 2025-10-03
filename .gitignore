@@ -1,3 +1,15 @@
-*.env 
-/node_modules
-*.db
+# Abhängigkeiten
+node_modules/
+
+# Umgebungsvariablen
+.env
+.env.*
+
+# Build/Cache (optional)
+dist/
+build/
+.vite/
+*.log
+
+# Beispiel-Env committen, echte nicht
+!.env.example

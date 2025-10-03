@@ -8,37 +8,116 @@ datasource db {
 }
 
 model User {
-  id         Int      @id @default(autoincrement())
-  discordId  String   @unique
-  username   String
-  avatar     String?
-  createdAt  DateTime @default(now())
+  id          Int      @id @default(autoincrement())
+  discordId   String   @unique
+  username    String?
+  displayName String?
+  avatarUrl   String?
+  rolesCsv    String?
+  isRaidlead  Boolean  @default(false)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  chars       BoosterChar[]
+  signups     Signup[]
 }
 
 model Raid {
-  id         Int      @id @default(autoincrement())
-  title      String
-  difficulty String
-  lootType   String
-  date       DateTime
-  lead       String?
-  bosses     Int      @default(8)
-  channelId  String?
+  id           Int       @id @default(autoincrement())
+  title        String
+  difficulty   String
+  lootType     String
+  date         DateTime
+  lead         String?              // Displayname des Leads
+  bosses       Int
+
+  // Preset-Snapshot
+  tanks        Int       @default(0)
+  healers      Int       @default(0)
+  dps          Int       @default(0)
+  lootbuddies  Int       @default(0)
+
+  // Discord
+  channelId    String?
+  messageId    String?
+
+  // Preset-Relation
+  presetId     Int?
+  preset       Preset?   @relation(fields: [presetId], references: [id])
+
+  signups      Signup[]
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
 }
 
-model Chars {
+model Preset {
+  id          Int     @id @default(autoincrement())
+  name        String
+  tanks       Int     @default(0)
+  healers     Int     @default(0)
+  dps         Int     @default(0)
+  lootbuddies Int     @default(0)
+  raids       Raid[]
+}
+
+model BoosterChar {
   id        Int      @id @default(autoincrement())
-  ownerId   String
+  userId    String   // Discord User ID (FK -> User.discordId)
   name      String
-  realm     String   // slug, z.B. "silvermoon"
-  region    String   // EU | US | ...
+  realm     String
   class     String?
   spec      String?
   rioScore  Float?
-  rioJson   String?  // <-- statt Json, wir speichern JSON.stringify(...)
-  updatedAt DateTime @updatedAt
-  createdAt DateTime @default(now())
 
-  @@unique([ownerId, name, realm, region], name: "ownerId_name_realm_region")
+  // Zusatzfelder
+  progress  String?
+  itemLevel Int?
+  wclUrl    String?
+
+  updatedAt DateTime @updatedAt
+
+  user      User     @relation(fields: [userId], references: [discordId], onDelete: Cascade)
+
+  signups   Signup[]
 }
 
+model Signup {
+  id          Int          @id @default(autoincrement())
+  raidId      Int
+  userId      String?
+  type        SignupType
+  charId      Int?
+  displayName String?
+  saved       Boolean      @default(false)
+  note        String?
+
+  // Snapshot der Klasse zum Signup-Zeitpunkt
+  class       String?
+
+  // Status der Anmeldung
+  status      SignupStatus @default(SIGNUPED)
+
+  createdAt   DateTime     @default(now())
+
+  raid        Raid         @relation(fields: [raidId], references: [id], onDelete: Cascade)
+  char        BoosterChar? @relation(fields: [charId], references: [id], onDelete: SetNull)
+  user        User?        @relation(fields: [userId], references: [discordId], onDelete: SetNull)
+
+  @@index([raidId])
+  @@index([userId])
+  @@index([charId])
+}
+
+enum SignupType {
+  TANK
+  HEAL
+  DPS
+  LOOTBUDDY
+}
+
+enum SignupStatus {
+  SIGNUPED // angemeldet
+  PICKED   // im Roster
+}

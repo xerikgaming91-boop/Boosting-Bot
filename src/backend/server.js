@@ -1,55 +1,130 @@
-// ESM
-import fs from 'node:fs';
-import path from 'node:path';
-import express from 'express';
-import cors from 'cors';
-import cookieParser from 'cookie-parser';
-import dotenv from 'dotenv';
-import { PrismaClient } from '@prisma/client';
+// src/backend/server.js
+import "dotenv/config";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
+import express from "express";
+import cors from "cors";
+import cookieParser from "cookie-parser";
+import morgan from "morgan";
 
-import { ensureBotReady, discordStatus } from './discord/index.js';
-import { authRouter } from './routes/auth.js';
-import { leadsRouter } from './routes/leads.js';
-import { makeRaidsRouter } from './routes/raids.js';
-import { makeCharsRouter } from './routes/chars.js';
+// Discord & DB
+import { ensureBotReady, discordStatus } from "./discord/bot.js";
+import { prisma } from "./prismaClient.js";
 
-const CWD = process.cwd();
-const envPath = path.join(CWD, '.env');
-console.log('[BACKEND] [ENV] candidates:');
-if (fs.existsSync(envPath)) console.log(`[BACKEND]   - ${envPath}`);
-dotenv.config({ path: envPath });
-console.log(`[BACKEND] [ENV] loaded from: ${fs.existsSync(envPath) ? envPath : '(process env only)'}`);
+// API-Router
+import authRouter from "./routes/auth.js";
+import raidsRouter from "./routes/raids.js";
+import leadsRouter from "./routes/leads.js";
+import charsRouter from "./routes/chars.js";
+import presetsRouter from "./routes/presets.js";
 
-const ENV = {
-  FRONTEND_URL: process.env.FRONTEND_URL || 'http://localhost:5173',
-  BACKEND_URL: process.env.BACKEND_URL || 'http://localhost:4000',
-};
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-const prisma = new PrismaClient();
 const app = express();
+const PORT = Number(process.env.PORT || 4000);
 
-app.use(cors({ origin: ENV.FRONTEND_URL, credentials: true }));
-app.use(express.json({ limit: '1mb' }));
+// CORS, Parser, Logging
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+app.use(express.json());
 app.use(cookieParser());
+app.use(morgan("dev"));
 
-// Bot hochfahren (Logs kommen in der Konsole)
-ensureBotReady().catch(err => {
-  console.error('❌ Discord-Bot konnte nicht starten:', err?.message || err);
+/* --------- API: Cache komplett aus! (sonst 304 → stale) --------- */
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    res.set("Cache-Control", "no-store");
+    res.set("Pragma", "no-cache");
+    res.set("Expires", "0");
+  }
+  next();
 });
 
-// Health + Discord Status
-app.get('/api/health', (_req, res) => res.json({ ok: true, time: new Date().toISOString() }));
-app.get('/api/discord/status', (_req, res) => res.json(discordStatus()));
+/* ---------------- API ---------------- */
+app.get("/api/health", (_req, res) =>
+  res.json({ ok: true, now: new Date().toISOString() })
+);
+app.get("/api/discord/status", (_req, res) => res.json(discordStatus()));
 
-// Routen
-app.use('/api/auth', authRouter);
-app.use('/api/leads', leadsRouter);
-app.use('/api/raids', makeRaidsRouter({ prisma }));
-app.use('/api/chars', makeCharsRouter({ prisma }));
+app.use("/api/auth", authRouter);
+app.use("/api/raids", raidsRouter);
+app.use("/api/leads", leadsRouter);
+app.use("/api/chars", charsRouter);
+app.use("/api/presets", presetsRouter);
 
-// Start
-const url = new URL(process.env.BACKEND_URL || 'http://localhost:4000');
-const PORT = Number(url.port) || 4000;
-app.listen(PORT, () => {
-  console.log(`[BACKEND] API listening on http://localhost:${PORT}`);
+// Immer JSON für unbekannte API-Routen
+app.use("/api", (req, res) => {
+  res.status(404).json({ ok: false, error: "NOT_FOUND", path: req.originalUrl });
+});
+
+/* ----------- Frontend (Vite/SPA) ----------- */
+const isProd = process.env.NODE_ENV === "production";
+const frontendRoot = path.resolve(__dirname, "../frontend");
+
+if (!isProd) {
+  const { createServer: createViteServer } = await import("vite");
+  const vite = await createViteServer({
+    root: frontendRoot,
+    server: { middlewareMode: true },
+    appType: "custom",
+  });
+  app.use(vite.middlewares);
+
+  app.use("*", async (req, res, next) => {
+    if (req.originalUrl.startsWith("/api/")) return next();
+    try {
+      const url = req.originalUrl;
+      const indexHtmlPath = path.join(frontendRoot, "index.html");
+      let html = await fs.readFile(indexHtmlPath, "utf-8");
+      html = await vite.transformIndexHtml(url, html);
+      res.status(200).set({ "Content-Type": "text/html" }).end(html);
+    } catch (err) {
+      vite.ssrFixStacktrace?.(err);
+      next(err);
+    }
+  });
+} else {
+  const distDir = path.resolve(frontendRoot, "dist");
+  app.use(express.static(distDir));
+
+  app.get("*", (req, res, next) => {
+    if (req.path.startsWith("/api/")) return next();
+    res.sendFile(path.join(distDir, "index.html"));
+  });
+}
+
+/* ------------- Start Server ------------- */
+app.listen(PORT, async () => {
+  console.log(
+    "[BACKEND] [ENV] summary:",
+    JSON.stringify(
+      {
+        FRONTEND_URL: process.env.FRONTEND_URL || `http://localhost:${PORT}`,
+        BACKEND_URL: process.env.BACKEND_URL || `http://localhost:${PORT}`,
+        OAUTH_REDIRECT_URI: process.env.OAUTH_REDIRECT_URI,
+        GUILD_ID: process.env.DISCORD_GUILD_ID || process.env.GUILD_ID,
+        RAIDLEAD_ROLE_ID:
+          process.env.RAIDLEAD_ROLE_ID ||
+          process.env.DISCORD_ROLE_RAIDLEAD_ID ||
+          process.env.DISCORD_ROLE_RAIDLEAD,
+        BOT_TOKEN_SET: !!(process.env.DISCORD_TOKEN || process.env.BOT_TOKEN),
+        MODE: isProd ? "production" : "development",
+      },
+      null,
+      2
+    )
+  );
+  console.log(`[BACKEND] Server listening on http://localhost:${PORT}`);
+
+  try { await prisma.$queryRaw`SELECT 1;`; } catch {}
+
+  try { await ensureBotReady(); } catch (e) {
+    console.error("[BACKEND] Discord login failed:", e?.message || e);
+  }
 });

@@ -4,12 +4,11 @@
   "type": "module",
   "private": true,
   "scripts": {
-    "dev": "concurrently -n BACKEND,FRONTEND,STUDIO -c blue,green,magenta \"node src/backend/server.js\" \"vite frontend\" \"prisma studio --schema src/backend/prisma/schema.prisma --port 5555\"",
+    "dev": "node src/backend/server.js",
     "build": "vite build",
     "prisma:generate": "prisma generate --schema src/backend/prisma/schema.prisma",
     "prisma:push": "prisma db push --schema src/backend/prisma/schema.prisma",
-    "prisma:studio": "prisma studio --schema src/backend/prisma/schema.prisma --port 5555",
-    "bot:selftest": "node src/backend/discord/selftest.mjs"
+    "prisma:studio": "prisma studio --schema src/backend/prisma/schema.prisma --port 5555"
   },
   "dependencies": {
     "@prisma/client": "^6.16.3",
@@ -29,7 +28,6 @@
     "@tailwindcss/forms": "^0.5.10",
     "@vitejs/plugin-react": "^4.3.1",
     "autoprefixer": "^10.4.21",
-    "concurrently": "^8.2.2",
     "postcss": "^8.5.6",
     "prisma": "^5.22.0",
     "tailwindcss": "^3.4.17",

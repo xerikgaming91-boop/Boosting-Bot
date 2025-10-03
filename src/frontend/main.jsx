@@ -1,8 +1,8 @@
-import React from "react";
+import React from "react";                   // <— WICHTIG
 import ReactDOM from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
-import "./index.css";              // liegt in frontend/
-import App from "./app/App.jsx";   // App liegt in frontend/app/App.jsx
+import App from "./app/App.jsx";
+import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>

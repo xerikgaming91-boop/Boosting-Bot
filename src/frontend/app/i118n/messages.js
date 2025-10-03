@@ -1,0 +1,96 @@
+// Sprach-Strings (DE/EN). Nach Bedarf erweitern.
+export const MESSAGES = {
+  de: {
+    nav: { raids: "Raids", chars: "Chars", presets: "Presets", users: "Users" },
+    auth: { login: "Login", logout: "Logout" },
+    common: {
+      settings: "Einstellungen",
+      loading: "Lade…",
+      backToOverview: "Zurück zur Übersicht",
+      none: "keine",
+    },
+    raid: {
+      header: {
+        lead: "Lead",
+        channel: "Channel",
+        preset: "Preset",
+      },
+      actions: {
+        postRoster: "Roster posten",
+        edit: "Bearbeiten",
+        save: "Speichern",
+        cancel: "Abbrechen",
+      },
+      form: {
+        dateTime: "Datum & Uhrzeit",
+        difficulty: "Difficulty",
+        lootType: "Loot-Type",
+        raidLead: "Raid Lead",
+        bossesMythic: "Bosse (Mythic)",
+        preset: "Preset",
+      },
+      blocks: {
+        plannedRoster: "Roster (geplant)",
+        signups: "Signups (offen)",
+        planned: "geplant",
+        signupsCount: "Anmeldungen",
+        scheduledElsewhere: "Eingeplant (andere Raids)",
+        checklist: "Checklist",
+        raidbuffs: "Raidbuffs",
+        missing: "fehlt",
+        notFound: "Raid nicht gefunden",
+      },
+      mythicProgress: "{n}/8",
+      dateLine: "{date} • {difficulty} • {loot}{mythic}",
+    },
+    diff: { Normal: "Normal", Heroic: "Heroic", Mythic: "Mythic" },
+    loot: { Saved: "Saved", Unsaved: "Unsaved", VIP: "VIP" },
+  },
+
+  en: {
+    nav: { raids: "Raids", chars: "Chars", presets: "Presets", users: "Users" },
+    auth: { login: "Login", logout: "Logout" },
+    common: {
+      settings: "Settings",
+      loading: "Loading…",
+      backToOverview: "Back to overview",
+      none: "none",
+    },
+    raid: {
+      header: {
+        lead: "Lead",
+        channel: "Channel",
+        preset: "Preset",
+      },
+      actions: {
+        postRoster: "Post roster",
+        edit: "Edit",
+        save: "Save",
+        cancel: "Cancel",
+      },
+      form: {
+        dateTime: "Date & Time",
+        difficulty: "Difficulty",
+        lootType: "Loot Type",
+        raidLead: "Raid Lead",
+        bossesMythic: "Bosses (Mythic)",
+        preset: "Preset",
+      },
+      blocks: {
+        plannedRoster: "Roster (planned)",
+        signups: "Signups (open)",
+        planned: "planned",
+        signupsCount: "Signups",
+        scheduledElsewhere: "Scheduled (other raids)",
+        checklist: "Checklist",
+        raidbuffs: "Raid buffs",
+        missing: "missing",
+        notFound: "Raid not found",
+      },
+      mythicProgress: "{n}/8",
+      dateLine: "{date} • {difficulty} • {loot}{mythic}",
+    },
+    diff: { Normal: "Normal", Heroic: "Heroic", Mythic: "Mythic" },
+    loot: { Saved: "Saved", Unsaved: "Unsaved", VIP: "VIP" },
+  },
+};
