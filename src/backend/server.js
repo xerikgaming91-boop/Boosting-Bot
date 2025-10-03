@@ -6,11 +6,21 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+/**
+ * MODE/ENV
+ */
 const ENV = process.env;
 const IS_PROD = (ENV.MODE || ENV.NODE_ENV) === "production";
 const PORT = Number(ENV.PORT || 4000);
 
-// --- __dirname / project paths (ESM-safe) ---
+// Rollen aus .env
+const ROLE_ADMIN_ID = ENV.DISCORD_ROLE_ADMIN_ID || ENV.ADMIN_ROLE_ID || null;
+const ROLE_RAIDLEAD_ID = ENV.RAIDLEAD_ROLE_ID || null;
+const OWNER_USER_ID = ENV.OWNER_USER_ID || null;
+
+/**
+ * Pfade (ESM-safe)
+ */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "../..");
@@ -20,7 +30,9 @@ const INDEX_FILE = IS_PROD
   ? path.join(DIST_DIR, "index.html")
   : path.join(FRONTEND_ROOT, "index.html");
 
-// --- Helper logging ---
+/**
+ * Logging helpers
+ */
 function ts() {
   return new Date().toTimeString().split(" ")[0];
 }
@@ -34,23 +46,100 @@ function logEnvSummary() {
     OAUTH_REDIRECT_URI:
       ENV.OAUTH_REDIRECT_URI || `http://localhost:${PORT}/api/auth/callback`,
     GUILD_ID: ENV.DISCORD_GUILD_ID || ENV.GUILD_ID || "",
-    RAIDLEAD_ROLE_ID:
-      ENV.RAIDLEAD_ROLE_ID ||
-      ENV.DISCORD_ROLE_RAIDLEAD_ID ||
-      ENV.DISCORD_ROLE_RAIDLEAD ||
-      "",
+    RAIDLEAD_ROLE_ID: ROLE_RAIDLEAD_ID || "",
+    ADMIN_ROLE_ID: ROLE_ADMIN_ID || "",
     BOT_TOKEN_SET: !!ENV.DISCORD_TOKEN,
     MODE: ENV.MODE || ENV.NODE_ENV || "development"
   };
   log("ENV", "summary:", JSON.stringify(summary, null, 2));
 }
 
-// --- Express app ---
+/**
+ * Express app
+ */
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
 
-// --- Routes dynamic mount (Windows-safe using file://) ---
+/**
+ * Utility: User/Rollen prüfen
+ * Erwartet, dass req.user gesetzt ist (dein Auth-Middleware).
+ * Fällt weich zurück, falls noch nicht vorhanden (macht dann nichts).
+ */
+function hasRoleId(user, roleId) {
+  if (!user || !roleId) return false;
+  const roles = user.roles || user.discord_roles || [];
+  return Array.isArray(roles) && roles.includes(roleId);
+}
+function isOwnerOrAdmin(user) {
+  return Boolean(
+    user &&
+      (
+        user.isOwner ||
+        user.isAdmin ||
+        hasRoleId(user, ROLE_ADMIN_ID) ||
+        (OWNER_USER_ID && user.id === OWNER_USER_ID)
+      )
+  );
+}
+
+/**
+ * SECURITY MIDDLEWARE:
+ * Erzwingt beim Erstellen eines Raids die Raidlead-Regel:
+ * - Nur Owner/Admin dürfen leadId frei setzen.
+ * - Raidlead-Rolle (oder darunter): lead = Ersteller selbst.
+ *
+ * Hinweise:
+ * - Wir lassen alle anderen /api/raids-Requests unangetastet.
+ * - Wir setzen mehrere potenzielle Feldnamen, damit das bestehende
+ *   Route-Handling (egal ob leadId / leadUserId / raidlead_id) korrekt greift.
+ */
+function enforceRaidLeadOnCreate(req, _res, next) {
+  try {
+    // Nur POST auf /api/raids (Create)
+    if (req.method !== "POST") return next();
+
+    // Falls Auth noch nicht lief, nichts kaputt machen:
+    const me = req.user || null;
+    if (!me) return next();
+
+    // Admin darf lead aus dem Body setzen, sonst überschreiben wir auf den Ersteller
+    const admin = isOwnerOrAdmin(me);
+
+    const incomingLead =
+      req.body?.leadId ||
+      req.body?.leadUserId ||
+      req.body?.raidleadId ||
+      req.body?.raidlead_id ||
+      null;
+
+    const chosenLead = admin && incomingLead ? String(incomingLead) : String(me.id);
+
+    // Setze mehrere Feldnamen, maximale Kompatibilität zur bestehenden Route:
+    req.body = req.body || {};
+    req.body.leadId = chosenLead;
+    req.body.leadUserId = chosenLead;
+    req.body.raidleadId = chosenLead;
+    req.body.raidlead_id = chosenLead;
+
+    // Optional: für Debug
+    if (!admin && incomingLead && incomingLead !== me.id) {
+      log(
+        "SEC",
+        `Non-admin tried to set lead (${incomingLead}) -> enforced to self (${me.id})`
+      );
+    }
+    next();
+  } catch (e) {
+    // Sicherheitshalber weiterreichen statt hart blockieren
+    log("SEC", `enforceRaidLeadOnCreate error: ${e.message}`);
+    next();
+  }
+}
+
+/**
+ * Routen dynamisch mounten (Windows-safe via file://)
+ */
 async function mountRoute(mountPath, relativeFile) {
   try {
     const absFile = path.resolve(__dirname, relativeFile);
@@ -65,7 +154,12 @@ async function mountRoute(mountPath, relativeFile) {
   }
 }
 
-// --- Mount API routes (best-effort; won't crash if a file is broken) ---
+/**
+ * Reihenfolge beachten:
+ * 1) Security-Middleware für /api/raids (muss VOR dem eigentlichen Router laufen)
+ * 2) Dann Router mounten
+ */
+app.use("/api/raids", enforceRaidLeadOnCreate);
 await mountRoute("/api/auth", "./routes/auth.js");
 await mountRoute("/api/raids", "./routes/raids.js");
 await mountRoute("/api/presets", "./routes/presets.js");
@@ -74,7 +168,9 @@ await mountRoute("/api/leads", "./routes/leads.js");
 await mountRoute("/api/users", "./routes/users.js");
 await mountRoute("/api/cycles", "./routes/cycles.js");
 
-// --- Discord Bot (best-effort) ---
+/**
+ * Discord Bot (best-effort)
+ */
 (async () => {
   try {
     const botUrl = pathToFileURL(path.resolve(__dirname, "./discord/bot.js")).href;
@@ -85,9 +181,11 @@ await mountRoute("/api/cycles", "./routes/cycles.js");
   }
 })();
 
-// --- Frontend dev/prod serving ---
+/**
+ * Frontend dev/prod
+ */
 if (IS_PROD) {
-  // Serve built assets
+  // dist ausliefern
   app.use(express.static(DIST_DIR, { index: false }));
   app.get("*", (req, res, next) => {
     if (req.path.startsWith("/api/")) return next();
@@ -98,7 +196,7 @@ if (IS_PROD) {
     });
   });
 } else {
-  // Development: Vite Middleware (fixes the text/jsx problem)
+  // Vite-Middleware in Dev (fix für text/jsx & HMR)
   const viteConfigFile = path.resolve(PROJECT_ROOT, "vite.config.js");
   const { createServer: createViteServer } = await import("vite");
   const vite = await createViteServer({
@@ -106,10 +204,9 @@ if (IS_PROD) {
     server: { middlewareMode: true }
   });
 
-  // Vite handles /main.jsx, assets, HMR, etc.
   app.use(vite.middlewares);
 
-  // SPA fallback with Vite HTML transform
+  // SPA Fallback mit HTML-Transform
   app.use(async (req, res, next) => {
     if (req.path.startsWith("/api/")) return next();
     try {
@@ -124,12 +221,16 @@ if (IS_PROD) {
   });
 }
 
-// --- Health check ---
+/**
+ * Health
+ */
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, mode: IS_PROD ? "production" : "development" });
 });
 
-// --- Start server ---
+/**
+ * Start
+ */
 app.listen(PORT, () => {
   logEnvSummary();
   log("SERVER", `listening on http://localhost:${PORT}`);
