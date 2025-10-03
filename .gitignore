@@ -13,3 +13,4 @@ build/
 
 # Beispiel-Env committen, echte nicht
 !.env.example
+.env
