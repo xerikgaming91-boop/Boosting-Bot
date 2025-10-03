@@ -8,68 +8,74 @@ datasource db {
 }
 
 model User {
-  id          Int      @id @default(autoincrement())
-  discordId   String   @unique
+  id          Int     @id @default(autoincrement())
+  discordId   String  @unique
   username    String?
   displayName String?
   avatarUrl   String?
-  rolesCsv    String?
-  isRaidlead  Boolean  @default(false)
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  // ROLES / PERMISSIONS
+  rolesCsv    String? // CSV der Discord-Rollen-IDs (Snapshot)
+  isRaidlead  Boolean @default(false)
+  isAdmin     Boolean @default(false)
+  isOwner     Boolean @default(false)
+  highestRole String? // "Owner" | "Admin" | "Raidlead" | "Booster" | "User"
+  roleLevel   Int     @default(0) // 100 Owner, 80 Admin, 60 Raidlead, 40 Booster, 10 User
 
-  chars       BoosterChar[]
-  signups     Signup[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  chars   BoosterChar[]
+  signups Signup[]
 }
 
 model Raid {
-  id           Int       @id @default(autoincrement())
-  title        String
-  difficulty   String
-  lootType     String
-  date         DateTime
-  lead         String?              // Displayname des Leads
-  bosses       Int
+  id         Int      @id @default(autoincrement())
+  title      String
+  difficulty String
+  lootType   String
+  date       DateTime
+  lead       String? // Displayname des Leads
+  bosses     Int
 
   // Preset-Snapshot
-  tanks        Int       @default(0)
-  healers      Int       @default(0)
-  dps          Int       @default(0)
-  lootbuddies  Int       @default(0)
+  tanks       Int @default(0)
+  healers     Int @default(0)
+  dps         Int @default(0)
+  lootbuddies Int @default(0)
 
   // Discord
-  channelId    String?
-  messageId    String?
+  channelId String?
+  messageId String?
 
   // Preset-Relation
-  presetId     Int?
-  preset       Preset?   @relation(fields: [presetId], references: [id])
+  presetId Int?
+  preset   Preset? @relation(fields: [presetId], references: [id])
 
-  signups      Signup[]
+  signups Signup[]
 
-  createdAt    DateTime  @default(now())
-  updatedAt    DateTime  @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Preset {
-  id          Int     @id @default(autoincrement())
+  id          Int    @id @default(autoincrement())
   name        String
-  tanks       Int     @default(0)
-  healers     Int     @default(0)
-  dps         Int     @default(0)
-  lootbuddies Int     @default(0)
+  tanks       Int    @default(0)
+  healers     Int    @default(0)
+  dps         Int    @default(0)
+  lootbuddies Int    @default(0)
   raids       Raid[]
 }
 
 model BoosterChar {
-  id        Int      @id @default(autoincrement())
-  userId    String   // Discord User ID (FK -> User.discordId)
-  name      String
-  realm     String
-  class     String?
-  spec      String?
-  rioScore  Float?
+  id       Int     @id @default(autoincrement())
+  userId   String // Discord User ID (FK -> User.discordId)
+  name     String
+  realm    String
+  class    String?
+  spec     String?
+  rioScore Float?
 
   // Zusatzfelder
   progress  String?
@@ -78,32 +84,32 @@ model BoosterChar {
 
   updatedAt DateTime @updatedAt
 
-  user      User     @relation(fields: [userId], references: [discordId], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [discordId], onDelete: Cascade)
 
-  signups   Signup[]
+  signups Signup[]
 }
 
 model Signup {
-  id          Int          @id @default(autoincrement())
+  id          Int        @id @default(autoincrement())
   raidId      Int
   userId      String?
   type        SignupType
   charId      Int?
   displayName String?
-  saved       Boolean      @default(false)
+  saved       Boolean    @default(false)
   note        String?
 
   // Snapshot der Klasse zum Signup-Zeitpunkt
-  class       String?
+  class String?
 
   // Status der Anmeldung
-  status      SignupStatus @default(SIGNUPED)
+  status SignupStatus @default(SIGNUPED)
 
-  createdAt   DateTime     @default(now())
+  createdAt DateTime @default(now())
 
-  raid        Raid         @relation(fields: [raidId], references: [id], onDelete: Cascade)
-  char        BoosterChar? @relation(fields: [charId], references: [id], onDelete: SetNull)
-  user        User?        @relation(fields: [userId], references: [discordId], onDelete: SetNull)
+  raid Raid         @relation(fields: [raidId], references: [id], onDelete: Cascade)
+  char BoosterChar? @relation(fields: [charId], references: [id], onDelete: SetNull)
+  user User?        @relation(fields: [userId], references: [discordId], onDelete: SetNull)
 
   @@index([raidId])
   @@index([userId])
@@ -119,5 +125,5 @@ enum SignupType {
 
 enum SignupStatus {
   SIGNUPED // angemeldet
-  PICKED   // im Roster
+  PICKED // im Roster
 }

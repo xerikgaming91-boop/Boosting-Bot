@@ -2,13 +2,13 @@
 module.exports = {
   darkMode: 'class',
   content: [
-    './index.html',
-    './src/**/*.{js,jsx,ts,tsx}',
+    './src/frontend/index.html',
+    './src/frontend/**/*.{js,jsx,ts,tsx}',
   ],
   theme: {
     extend: {
       colors: {
-        // Primärfarbe: grün (wie im Referenz-Screenshot)
+        // Primärfarbe: grün
         brand: {
           DEFAULT: '#22c55e', // emerald-500
           600: '#16a34a',     // emerald-600 (Hover)
