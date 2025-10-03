@@ -1,110 +1,161 @@
+// src/backend/discord/modules/raidAnnounceAdapter.js
+import { ensureBotReady } from "../bot.js";
 import { prisma } from "../../prismaClient.js";
 import { buildRaidMessage } from "./raidEmbed.js";
 import { getSignupComponents } from "./raidSignup.js";
-import { createRaidChannel } from "./raidChannel.js";
-import { ensureBotReady } from "../bot.js";
 
 const ENV = process.env;
+const GUILD_ID = ENV.DISCORD_GUILD_ID || ENV.GUILD_ID || "";
+const RAID_CATEGORY_ID =
+  ENV.DISCORD_RAID_CATEGORY_ID || ENV.RAID_CATEGORY_ID || "";
 
-function groupSignups(rows = []) {
-  const pick = (f) => rows.filter(f).map(x =>
-    x.char?.name
-      ? `${x.char.name}${x.char.realm ? ` (${x.char.realm})` : ""}${x.saved ? " ✅" : ""}`
-      : (x.displayName || "—")
+// kleines Timestamp-Logging
+const ts = () => {
+  const d = new Date();
+  return (
+    d.toLocaleTimeString("de-DE", { hour12: false }) +
+    "." +
+    String(d.getMilliseconds()).padStart(3, "0")
   );
+};
+const dbg = (...a) => console.log("[ANNOUNCE-DBG " + ts() + "]", ...a);
+const perr = (...a) => console.log("[ANNOUNCE-ERR " + ts() + "]", ...a);
 
-  const isType = (t) => (x) => String(x.type).toUpperCase() === t;
-  const isRoster = (x) => String(x.status || "").toUpperCase() === "PICKED";
-
-  return {
-    roster: {
-      tanks: pick((x) => isRoster(x) && isType("TANK")(x)),
-      heals: pick((x) => isRoster(x) && isType("HEAL")(x)),
-      dps:   pick((x) => isRoster(x) && isType("DPS")(x)),
-      loot:  pick((x) => isRoster(x) && isType("LOOTBUDDY")(x)),
+/** Hilfsfunktion: Raid inkl. Signups aus DB holen */
+async function loadRaidFull(raidId) {
+  const id = Number(raidId);
+  if (!Number.isFinite(id)) throw new Error("invalid_raid_id");
+  const raid = await prisma.raid.findUnique({
+    where: { id },
+    include: {
+      signups: {
+        include: {
+          char: true,
+          user: true,
+        },
+        orderBy: { createdAt: "asc" },
+      },
     },
-    signups: {
-      tanks: pick((x) => !isRoster(x) && isType("TANK")(x)),
-      heals: pick((x) => !isRoster(x) && isType("HEAL")(x)),
-      dps:   pick((x) => !isRoster(x) && isType("DPS")(x)),
-      loot:  pick((x) => !isRoster(x) && isType("LOOTBUDDY")(x)),
-    },
-  };
+  });
+  if (!raid) throw new Error("raid_not_found");
+  return raid;
 }
 
-/** Lädt Raid + Signups aus der DB. */
-async function fetchRaidFull(raidId) {
-  const raid = await prisma.raid.findUnique({ where: { id: Number(raidId) } });
-  if (!raid) throw new Error("raid_not_found");
-
-  // leadName: aus User oder als Fallback die gespeicherte ID
-  let leadName = null;
+/** Kanal-Namensschema: "di-1430-mythic-vip-####" o.ä. */
+function makeChannelName(raid) {
   try {
-    const user = await prisma.user.findUnique({
-      where: { discordId: String(raid.lead || "") },
-      select: { displayName: true, username: true },
-    });
-    leadName = user?.displayName || user?.username || null;
-  } catch {}
-  const raidShape = { ...raid, leadName: leadName || raid.lead || null };
+    const dt = new Date(raid.date);
+    const wd = dt
+      .toLocaleDateString("de-DE", { weekday: "short" })
+      .replace(".", "")
+      .toLowerCase(); // mo, di, mi...
+    const hh = String(dt.getHours()).padStart(2, "0");
+    const mm = String(dt.getMinutes()).padStart(2, "0");
+    const diff = String(raid.difficulty || "").toLowerCase(); // heroic/mythic/...
+    const loot = String(raid.lootType || "").toLowerCase(); // vip/community/...
+    return `${wd}-${hh}${mm}-${diff}-${loot}-${raid.id}`;
+  } catch {
+    return `raid-${raid.id}`;
+  }
+}
 
-  const signups = await prisma.signup.findMany({
-    where: { raidId: Number(raidId) },
-    include: { char: true, user: true, raid: true },
-    orderBy: { createdAt: "asc" },
+/** Neuen Kanal + Embed-Message anlegen, IDs in DB speichern */
+async function postInitialMessage(client, raid) {
+  if (!GUILD_ID) throw new Error("missing_guild_id");
+
+  const guild = await client.guilds.fetch(GUILD_ID);
+
+  // Kanal erzeugen (falls noch nicht vorhanden)
+  let channel = null;
+  if (raid.channelId) {
+    try {
+      channel = await guild.channels.fetch(raid.channelId);
+    } catch {
+      channel = null;
+    }
+  }
+  if (!channel) {
+    channel = await guild.channels.create({
+      name: makeChannelName(raid),
+      parent: RAID_CATEGORY_ID || null,
+      type: 0, // GuildText
+      reason: `Raid #${raid.id}`,
+    });
+  }
+
+  // Embeds + Buttons
+  const embeds = buildRaidMessage(raid);
+  const components = getSignupComponents(raid.id);
+
+  const msg = await channel.send({ embeds, components });
+
+  // IDs in DB ablegen
+  await prisma.raid.update({
+    where: { id: raid.id },
+    data: {
+      channelId: channel.id,
+      messageId: msg.id,
+    },
   });
 
-  return { raid: raidShape, signups, groups: groupSignups(signups) };
+  return { channelId: channel.id, messageId: msg.id };
 }
 
-/** Erst-Announcement: Channel erstellen (falls nötig) + Nachricht posten. */
-export async function announceRaid({ raidId }) {
-  if (!raidId) throw new Error("announceRaid: raidId missing");
+/** Öffentliche API: neuen Raid announcen (wird von /raids create genutzt) */
+export async function announceRaid(input) {
+  // input kann raidId (number) ODER ein frisch erstelltes Raid-Objekt sein
+  const raidId =
+    typeof input === "number"
+      ? input
+      : input?.raidId ?? input?.id ?? undefined;
+
+  dbg("announceRaid() in", { raidId, optsIn: input });
+
   const client = await ensureBotReady();
 
-  const { raid, groups } = await fetchRaidFull(raidId);
+  // Raid laden (immer fresh aus DB, damit wir Referenzen sauber haben)
+  const raid = await loadRaidFull(raidId);
 
-  let channelId = raid.channelId;
-  let messageId = raid.messageId;
-
-  if (!channelId) {
-    const ch = await createRaidChannel(client, raid);
-    channelId = ch.id;
-    await prisma.raid.update({ where: { id: raid.id }, data: { channelId } });
+  // Falls es schon eine gespeicherte Nachricht gibt, einfach updaten
+  if (raid.channelId && raid.messageId) {
+    await refreshRaidMessage(raid.id);
+    return { ok: true, updated: true, raidId: raid.id };
   }
 
-  const ch = await client.channels.fetch(channelId);
-  const payload = buildRaidMessage(raid, groups);
-  const components = getSignupComponents(raid.id);
-
-  let msg;
-  if (messageId) {
-    msg = await ch.messages.fetch(messageId).catch(() => null);
-    if (msg) await msg.edit({ ...payload, components });
-  }
-  if (!msg) {
-    msg = await ch.send({ ...payload, components });
-    messageId = msg.id;
-    await prisma.raid.update({ where: { id: raid.id }, data: { messageId } });
-  }
-
-  return { channelId, messageId };
+  // Sonst initial posten
+  await postInitialMessage(client, raid);
+  return { ok: true, created: true, raidId: raid.id };
 }
 
-/** Embed nach Änderungen (Signups etc.) aktualisieren. */
+/** Öffentliche API: bestehendes Embed + Buttons aktualisieren */
 export async function refreshRaidMessage(raidId) {
   const client = await ensureBotReady();
-  const { raid, groups } = await fetchRaidFull(raidId);
-  if (!raid.channelId || !raid.messageId) return false;
+  const raid = await loadRaidFull(raidId);
 
-  const ch = await client.channels.fetch(raid.channelId).catch(() => null);
-  if (!ch) return false;
+  // wenn es noch keinen Post gab: initial posten
+  if (!raid.channelId || !raid.messageId) {
+    dbg("refreshRaidMessage: no message yet -> post initial");
+    await postInitialMessage(client, raid);
+    return true;
+  }
 
-  const msg = await ch.messages.fetch(raid.messageId).catch(() => null);
-  if (!msg) return false;
+  // Nachricht editieren
+  try {
+    const guild = await client.guilds.fetch(GUILD_ID);
+    const channel = await guild.channels.fetch(raid.channelId);
+    const message = await channel.messages.fetch(raid.messageId);
 
-  const payload = buildRaidMessage(raid, groups);
-  const components = getSignupComponents(raid.id);
-  await msg.edit({ ...payload, components });
-  return true;
+    const embeds = buildRaidMessage(raid);
+    const components = getSignupComponents(raid.id);
+
+    await message.edit({ embeds, components });
+    dbg("refreshRaidMessage: edited", { raidId: raid.id });
+    return true;
+  } catch (e) {
+    perr("refreshRaidMessage: edit failed -> try re-post", e?.message || e);
+    // Fallback: neu posten und DB updaten
+    const posted = await postInitialMessage(client, raid);
+    dbg("refreshRaidMessage: reposted", posted);
+    return true;
+  }
 }

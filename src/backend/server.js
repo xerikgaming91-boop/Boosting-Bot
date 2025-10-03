@@ -12,12 +12,13 @@ import morgan from "morgan";
 import { ensureBotReady, discordStatus } from "./discord/bot.js";
 import { prisma } from "./prismaClient.js";
 
-// API-Router
+// API-Router (alle als Default-Export)
 import authRouter from "./routes/auth.js";
 import raidsRouter from "./routes/raids.js";
 import leadsRouter from "./routes/leads.js";
 import charsRouter from "./routes/chars.js";
 import presetsRouter from "./routes/presets.js";
+import cyclesRouter from "./routes/cycles.js"; // <-- neu
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,10 +26,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = Number(process.env.PORT || 4000);
 
-// CORS, Parser, Logging
+// Eine Origin: :4000
 app.use(
   cors({
-    origin: true,
+    origin: true, // spiegelt Origin
     credentials: true,
   })
 );
@@ -36,38 +37,25 @@ app.use(express.json());
 app.use(cookieParser());
 app.use(morgan("dev"));
 
-/* --------- API: Cache komplett aus! (sonst 304 → stale) --------- */
-app.use((req, res, next) => {
-  if (req.path.startsWith("/api/")) {
-    res.set("Cache-Control", "no-store");
-    res.set("Pragma", "no-cache");
-    res.set("Expires", "0");
-  }
-  next();
-});
-
 /* ---------------- API ---------------- */
-app.get("/api/health", (_req, res) =>
+app.get("/api/health", (req, res) =>
   res.json({ ok: true, now: new Date().toISOString() })
 );
-app.get("/api/discord/status", (_req, res) => res.json(discordStatus()));
+app.get("/api/discord/status", (req, res) => res.json(discordStatus()));
 
 app.use("/api/auth", authRouter);
 app.use("/api/raids", raidsRouter);
 app.use("/api/leads", leadsRouter);
 app.use("/api/chars", charsRouter);
 app.use("/api/presets", presetsRouter);
-
-// Immer JSON für unbekannte API-Routen
-app.use("/api", (req, res) => {
-  res.status(404).json({ ok: false, error: "NOT_FOUND", path: req.originalUrl });
-});
+app.use("/api/cycles", cyclesRouter); // <-- neu
 
 /* ----------- Frontend (Vite/SPA) ----------- */
 const isProd = process.env.NODE_ENV === "production";
-const frontendRoot = path.resolve(__dirname, "../frontend");
+const frontendRoot = path.resolve(__dirname, "../frontend"); // enthält index.html
 
 if (!isProd) {
+  // DEV: Vite als Middleware (ein Prozess, Port :4000)
   const { createServer: createViteServer } = await import("vite");
   const vite = await createViteServer({
     root: frontendRoot,
@@ -76,6 +64,7 @@ if (!isProd) {
   });
   app.use(vite.middlewares);
 
+  // SPA-Fallback in DEV
   app.use("*", async (req, res, next) => {
     if (req.originalUrl.startsWith("/api/")) return next();
     try {
@@ -90,9 +79,11 @@ if (!isProd) {
     }
   });
 } else {
+  // PROD: gebaute Assets ausliefern
   const distDir = path.resolve(frontendRoot, "dist");
   app.use(express.static(distDir));
 
+  // SPA-Fallback in PROD
   app.get("*", (req, res, next) => {
     if (req.path.startsWith("/api/")) return next();
     res.sendFile(path.join(distDir, "index.html"));
@@ -109,11 +100,8 @@ app.listen(PORT, async () => {
         BACKEND_URL: process.env.BACKEND_URL || `http://localhost:${PORT}`,
         OAUTH_REDIRECT_URI: process.env.OAUTH_REDIRECT_URI,
         GUILD_ID: process.env.DISCORD_GUILD_ID || process.env.GUILD_ID,
-        RAIDLEAD_ROLE_ID:
-          process.env.RAIDLEAD_ROLE_ID ||
-          process.env.DISCORD_ROLE_RAIDLEAD_ID ||
-          process.env.DISCORD_ROLE_RAIDLEAD,
-        BOT_TOKEN_SET: !!(process.env.DISCORD_TOKEN || process.env.BOT_TOKEN),
+        RAIDLEAD_ROLE_ID: process.env.RAIDLEAD_ROLE_ID,
+        BOT_TOKEN_SET: !!process.env.DISCORD_TOKEN,
         MODE: isProd ? "production" : "development",
       },
       null,
@@ -122,9 +110,16 @@ app.listen(PORT, async () => {
   );
   console.log(`[BACKEND] Server listening on http://localhost:${PORT}`);
 
-  try { await prisma.$queryRaw`SELECT 1;`; } catch {}
+  try {
+    await prisma.$queryRaw`SELECT 1;`;
+    console.log("[prisma] ready. DATABASE_URL:", process.env.DATABASE_URL);
+  } catch (e) {
+    console.warn("[prisma] not ready:", e?.message || e);
+  }
 
-  try { await ensureBotReady(); } catch (e) {
+  try {
+    await ensureBotReady();
+  } catch (e) {
     console.error("[BACKEND] Discord login failed:", e?.message || e);
   }
 });

@@ -10,7 +10,6 @@ import { ensureBotReady } from "../discord/bot.js";
 const ENV = process.env;
 const router = express.Router();
 
-/* -------------------- ENV / CONST -------------------- */
 const COOKIE_NAME      = ENV.JWT_COOKIE_NAME || ENV.COOKIE_NAME || "bb_auth";
 const COOKIE_SECRET    = ENV.JWT_Secret || ENV.COOKIE_SECRET || "dev-secret-fallback";
 const RAIDLEAD_ROLE_ID = ENV.RAIDLEAD_ROLE_ID || ENV.DISCORD_ROLE_RAIDLEAD_ID || ENV.DISCORD_ROLE_RAIDLEAD || "";
@@ -18,51 +17,37 @@ const ADMIN_ROLE_ID    = ENV.DISCORD_ROLE_ADMIN_ID || ENV.ADMIN_ROLE_ID || "";
 const IS_PROD          = (ENV.MODE || ENV.NODE_ENV) === "production";
 
 const GUILD_ID         = ENV.DISCORD_GUILD_ID || ENV.GUILD_ID || "";
+const RAID_CATEGORY_ID = ENV.DISCORD_RAID_CATEGORY_ID || ENV.RAID_CATEGORY_ID || "";
 
 const DATA_FILE        = path.resolve(process.cwd(), "dev-raids.json");
-
-// Fallback: Bosse pro Schwierigkeit, wenn nichts mitgegeben wird
 const DEFAULT_BOSSES_BY_DIFF = { Normal: 8, Heroic: 8, Mythic: 8 };
 
-/* -------------------- Logging -------------------- */
+function ts() {
+  const d = new Date();
+  return d.toLocaleTimeString("de-DE",{hour12:false})+"."+String(d.getMilliseconds()).padStart(3,"0");
+}
 function dbg(...a) {
   if (ENV.DEBUG_AUTH === "true" || !IS_PROD) {
-    const t = new Date();
-    const ts =
-      t.toLocaleTimeString("de-DE", { hour12: false }) +
-      "." +
-      String(t.getMilliseconds()).padStart(3, "0");
-    console.log("[RAIDS-DBG " + ts + "]", ...a);
+    console.log("[RAIDS-DBG " + ts() + "]", ...a);
   }
 }
 
-/* -------------------- Auth Cookie (v1 HMAC) -------------------- */
+/* -------------------- auth cookie -------------------- */
 function verifyToken(token) {
   try {
     if (!token || typeof token !== "string") return null;
     const [v, payloadB64, sigB64] = token.split(".");
     if (v !== "v1" || !payloadB64 || !sigB64) return null;
     const payloadBuf = Buffer.from(payloadB64, "base64");
-    const expected = crypto
-      .createHmac("sha256", COOKIE_SECRET)
-      .update(payloadBuf)
-      .digest();
+    const expected = crypto.createHmac("sha256", COOKIE_SECRET).update(payloadBuf).digest();
     const given = Buffer.from(sigB64, "base64");
-    if (
-      expected.length !== given.length ||
-      !crypto.timingSafeEqual(expected, given)
-    )
-      return null;
+    if (expected.length !== given.length || !crypto.timingSafeEqual(expected, given)) return null;
     return JSON.parse(payloadBuf.toString("utf8"));
-  } catch {
-    return null;
-  }
+  } catch { return null; }
 }
 function getUser(req) {
   const raw = req.cookies?.[COOKIE_NAME];
-  const u = verifyToken(raw);
-  if (!u) dbg("attachJWT skipped: invalid token");
-  return u;
+  return verifyToken(raw);
 }
 function userCanCreate(u) {
   if (!u) return false;
@@ -73,28 +58,21 @@ function userCanCreate(u) {
   return false;
 }
 
-/* -------------------- Prisma / JSON-Fallback -------------------- */
+/* -------------------- prisma / fallback -------------------- */
 function getPrismaModel() {
-  const keys = ["raid", "Raid", "raids", "Raids"];
-  for (const k of keys) {
-    if (prisma?.[k]?.findMany) return prisma[k];
-  }
+  const c = ["raid","Raid","raids","Raids"];
+  for (const k of c) if (prisma?.[k]?.findMany) return prisma[k];
   return null;
 }
 async function jsonRead() {
-  try {
-    const s = await fs.readFile(DATA_FILE, "utf8");
-    const j = JSON.parse(s);
-    return Array.isArray(j) ? j : [];
-  } catch {
-    return [];
-  }
+  try { const s = await fs.readFile(DATA_FILE, "utf8"); const j = JSON.parse(s); return Array.isArray(j)?j:[]; }
+  catch { return []; }
 }
 async function jsonWrite(list) {
   await fs.writeFile(DATA_FILE, JSON.stringify(list, null, 2), "utf8");
 }
 
-/* -------------------- Helpers -------------------- */
+/* -------------------- helpers -------------------- */
 function normalizeRaid(r) {
   return {
     id: r.id || r.raidId || r._id || null,
@@ -102,13 +80,13 @@ function normalizeRaid(r) {
     difficulty: r.difficulty || r.diff || "",
     lootType: r.lootType || r.loot || "",
     date: r.date || r.when || r.datetime || null,
-    // Lead-Infos
-    leadId: r.leadId || null,      // legacy evtl. vorhanden
-    leadName: r.leadName || null,  // legacy evtl. vorhanden
-    lead: r.lead || null,          // bei dir: String = Discord-ID (oder null)
-    // Preset / Relation
+    // Lead Info
+    leadId: r.leadId || null,      // legacy optional
+    leadName: r.leadName || null,  // legacy optional
+    lead: r.lead || null,          // DB: Discord-ID od. Displayname – je nach Schema
+    // Preset/Relation
     presetId: r.presetId ?? r.preset ?? null,
-    // optionale Felder
+    // Optional
     bosses: typeof r.bosses === "number" ? r.bosses : null,
     channelId: r.channelId || null,
     messageId: r.messageId || null,
@@ -122,11 +100,7 @@ function validateCreatePayload(p) {
   if (!p.lootType) errs.push("lootType_required");
   if (!p.leadId && !p.lead && !p.leadName) errs.push("lead_required");
   if (!p.date) errs.push("date_required");
-  if (errs.length) {
-    const e = new Error("invalid_payload: " + errs.join(","));
-    e.status = 400;
-    throw e;
-  }
+  if (errs.length) { const e = new Error("invalid_payload: " + errs.join(",")); e.status = 400; throw e; }
 }
 function toBosses(p) {
   if (typeof p.bosses === "number") return p.bosses;
@@ -134,25 +108,20 @@ function toBosses(p) {
   return DEFAULT_BOSSES_BY_DIFF[d] ?? 8;
 }
 
-/** Discord-Displayname eines Users auf dem Server (Nickname > global_name > username). */
+/** Discord-Displayname auf dem Server (Nickname > global_name > username). */
 async function resolveServerDisplay(userId) {
   if (!userId || !GUILD_ID) return null;
   try {
     const cli = await ensureBotReady();
     if (!cli) return null;
-    const m = await cli.guilds
-      .fetch(GUILD_ID)
-      .then((g) => g.members.fetch(userId));
+    const m = await cli.guilds.fetch(GUILD_ID).then(g => g.members.fetch(userId));
     return m?.nickname || m?.user?.globalName || m?.user?.username || null;
   } catch {
     return null;
   }
 }
-
-/** Displayname zu einer leadId bestimmen (DB → Discord). */
 async function displayForLead(leadId) {
   if (!leadId) return null;
-  // 1) aus der User-DB (falls vorhanden)
   try {
     const u = await prisma.user.findUnique({
       where: { discordId: String(leadId) },
@@ -160,28 +129,26 @@ async function displayForLead(leadId) {
     });
     if (u) return u.displayName || u.username || null;
   } catch {}
-  // 2) live vom Server
   return await resolveServerDisplay(String(leadId));
 }
 
-/** Antwort so formen, dass `lead` **Displayname** ist (ID bleibt als leadId verfügbar). */
+/** Antwortobjekt so formen, dass `lead` der Displayname ist */
 async function shapeForResponse(row) {
   const n = normalizeRaid(row);
-  const leadId = n.lead || n.leadId || null; // DB speichert ID in `lead`
+  const leadId = n.lead || n.leadId || null;
   const leadDisplay = (await displayForLead(leadId)) || n.leadName || null;
-
   return {
     ...n,
     leadId: leadId || null,
     leadName: leadDisplay || (leadId ?? null),
-    lead: leadDisplay || (leadId ?? null), // <-- für das Frontend als Displayname ausgeben
+    lead: leadDisplay || (leadId ?? null),                 // Anzeigename nach außen
     detailUrl: n.id != null ? `/raids/${n.id}` : null,
   };
 }
 
-/* -------------------- ROUTES -------------------- */
+/* -------------------- routes -------------------- */
 
-// GET /api/raids – Liste
+// GET /api/raids
 router.get("/", async (_req, res) => {
   try {
     const model = getPrismaModel();
@@ -191,19 +158,14 @@ router.get("/", async (_req, res) => {
       for (const r of rows) out.push(await shapeForResponse(r));
       return res.json(out);
     }
-    // JSON-Fallback
     const list = await jsonRead();
-    list.sort((a, b) =>
-      String(b.date || "").localeCompare(String(a.date || ""))
-    );
+    list.sort((a,b)=>String(b.date||"").localeCompare(String(a.date||"")));
     const out = [];
     for (const r of list) out.push(await shapeForResponse(r));
     return res.json(out);
   } catch (e) {
     dbg("list_error:", e?.message || e);
-    res
-      .status(500)
-      .json({ ok: false, error: "LIST_FAILED", message: e?.message || "unknown" });
+    res.status(500).json({ ok:false, error:"LIST_FAILED", message:e?.message || "unknown" });
   }
 });
 
@@ -211,32 +173,29 @@ router.get("/", async (_req, res) => {
 async function createCore(req, res) {
   const u = getUser(req);
   if (!userCanCreate(u)) {
-    return res
-      .status(403)
-      .json({ ok: false, error: "FORBIDDEN", message: "insufficient_permissions" });
+    return res.status(403).json({ ok:false, error:"FORBIDDEN", message:"insufficient_permissions" });
   }
 
   const p = req.body || {};
   validateCreatePayload(p);
 
-  // Lead-Infos auflösen
-  let leadId = p.leadId ?? null;       // bevorzugt ID
+  // Lead-Displayname
+  let leadId = p.leadId ?? null;
   let leadDisplay = p.leadName ?? null;
-
   const looksLikeId = (s) => typeof s === "string" && /^[0-9]{16,20}$/.test(s);
-  if (!leadId && looksLikeId(p.lead)) leadId = p.lead; // falls im Frontend noch ID in `lead` steckt
+  if (!leadId && looksLikeId(p.lead)) leadId = p.lead;
   if (!leadDisplay && leadId) leadDisplay = await resolveServerDisplay(leadId);
-  if (!leadDisplay && p.lead && !looksLikeId(p.lead)) leadDisplay = p.lead; // falls Frontend Displayname in `lead`
+  if (!leadDisplay && p.lead && !looksLikeId(p.lead)) leadDisplay = p.lead;
 
   const bosses = toBosses(p);
 
-  // Nur DB-Felder an Prisma geben (in `lead` speichern wir die Discord-ID oder null)
-  const baseData = {
+  // Nur Schema-Felder an Prisma
+  const baseDataBoth = {
     title: p.title,
     difficulty: p.difficulty,
     lootType: p.lootType,
     date: p.date,
-    lead: leadId || (looksLikeId(p.lead) ? p.lead : null),
+    lead: leadId || (looksLikeId(p.lead) ? p.lead : leadDisplay || null), // dein Schema hält hier Displayname – wenn du ID willst -> leadId
     bosses,
   };
 
@@ -245,7 +204,6 @@ async function createCore(req, res) {
   let createdId = null;
 
   if (model) {
-    // optional Preset verbinden – wenn Schema das Feld hat
     const withPreset = (data) => {
       const out = { ...data };
       if (p.presetId) out.preset = { connect: { id: p.presetId } };
@@ -254,65 +212,24 @@ async function createCore(req, res) {
     const tryCreate = async (data) => model.create({ data });
 
     try {
-      created = await tryCreate(withPreset(baseData));
+      created = await tryCreate(withPreset(baseDataBoth));
       createdId = created?.id || null;
     } catch (e) {
-      // Kompatibel bleiben, wenn Schema abweicht (bosses/lead/preset optional rausnehmen)
       let msg = String(e?.message || "");
       dbg("prisma:error \n" + e);
 
       if (/Unknown arg `preset`/i.test(msg)) {
-        try {
-          const { preset, ...np } = withPreset(baseData);
-          created = await tryCreate(np);
-          createdId = created?.id || null;
-        } catch (e2) {
-          msg = String(e2?.message || "");
-          dbg("prisma:error noPreset\n" + e2);
-          if (/Unknown arg `bosses`/i.test(msg)) {
-            const { bosses, ...np2 } = withPreset(baseData);
-            created = await tryCreate(np2);
-            createdId = created?.id || null;
-          } else if (/Unknown arg `lead`/i.test(msg)) {
-            const { lead, ...np3 } = withPreset(baseData);
-            created = await tryCreate(np3);
-            createdId = created?.id || null;
-          } else {
-            throw e2;
-          }
-        }
+        const { preset, ...noPreset } = withPreset(baseDataBoth);
+        created = await tryCreate(noPreset);
+        createdId = created?.id || null;
       } else if (/Unknown arg `bosses`/i.test(msg)) {
-        try {
-          const { bosses, ...np } = withPreset(baseData);
-          created = await tryCreate(np);
-          createdId = created?.id || null;
-        } catch (e3) {
-          msg = String(e3?.message || "");
-          dbg("prisma:error noBosses\n" + e3);
-          if (/Unknown arg `lead`/i.test(msg)) {
-            const { lead, ...rest } = withPreset(baseData);
-            created = await tryCreate(rest);
-            createdId = created?.id || null;
-          } else {
-            throw e3;
-          }
-        }
+        const { bosses, ...noBosses } = withPreset(baseDataBoth);
+        created = await tryCreate(noBosses);
+        createdId = created?.id || null;
       } else if (/Unknown arg `lead`/i.test(msg)) {
-        try {
-          const { lead, ...np } = withPreset(baseData);
-          created = await tryCreate(np);
-          createdId = created?.id || null;
-        } catch (e5) {
-          msg = String(e5?.message || "");
-          dbg("prisma:error noLead\n" + e5);
-          if (/Unknown arg `bosses`/i.test(msg)) {
-            const { bosses, ...rest } = withPreset(baseData);
-            created = await tryCreate(rest);
-            createdId = created?.id || null;
-          } else {
-            throw e5;
-          }
-        }
+        const { lead, ...noLead } = withPreset(baseDataBoth);
+        created = await tryCreate(noLead);
+        createdId = created?.id || null;
       } else {
         throw e;
       }
@@ -321,7 +238,7 @@ async function createCore(req, res) {
     // JSON-Fallback
     const row = {
       id: crypto.randomUUID(),
-      ...baseData,
+      ...baseDataBoth,
       presetId: p.presetId ?? null,
     };
     const list = await jsonRead();
@@ -333,25 +250,23 @@ async function createCore(req, res) {
 
   const normalized = normalizeRaid(created);
 
-  // ---- Discord-Announcement via Adapter (WICHTIG: raidId übergeben!) ----
+  // ---- Discord-Announcement ----
   try {
-    const { channelId, messageId } = await announceRaid({
-      raidId: createdId || normalized.id, // <— Fix
-    });
+    dbg("announce with env IDs:", { GUILD_ID, RAID_CATEGORY_ID, createdId });
+    // WICHTIG: die Raid-ID als 1. Parameter übergeben!
+    const { channelId, messageId } = await announceRaid(
+      { id: createdId },                                     // <— FIX: ID als erstes Argument
+      { guildId: GUILD_ID || undefined, categoryId: RAID_CATEGORY_ID || undefined }
+    );
 
     if ((channelId || messageId) && createdId) {
-      const model2 = getPrismaModel();
-      if (model2) {
-        // failsafe: nur die Felder setzen, die existieren
-        try {
-          await model2.update({
-            where: { id: createdId },
-            data: {
-              ...(channelId ? { channelId } : {}),
-              ...(messageId ? { messageId } : {}),
-            },
-          });
-        } catch {}
+      const model = getPrismaModel();
+      if (model) {
+        const tryUpdate = async (data) => {
+          try { await model.update({ where: { id: createdId }, data }); return true; } catch { return false; }
+        };
+        if (channelId) await tryUpdate({ channelId });
+        if (messageId) await tryUpdate({ messageId });
       } else {
         const list = await jsonRead();
         const idx = list.findIndex((x) => x.id === createdId);
@@ -366,95 +281,76 @@ async function createCore(req, res) {
     dbg("announce failed (ignored):", String(e?.message || e));
   }
 
-  // Antwort: lead = Displayname
   return res.json({ ok: true, raid: await shapeForResponse(created) });
 }
 
-// POST /api/raids – Erstellen
+// POST /api/raids
 router.post("/", async (req, res) => {
-  try {
-    await createCore(req, res);
-  } catch (e) {
+  try { await createCore(req, res); }
+  catch (e) {
     const code = e.status || 500;
     dbg("create_error:", e?.message || e);
-    res
-      .status(code)
-      .json({ ok: false, error: "CREATE_FAILED", message: e?.message || "unknown" });
+    res.status(code).json({ ok:false, error:"CREATE_FAILED", message:e?.message || "unknown" });
   }
 });
 
-// POST /api/raids/create – Alias
+// POST /api/raids/create (Alias)
 router.post("/create", async (req, res) => {
-  try {
-    await createCore(req, res);
-  } catch (e) {
+  try { await createCore(req, res); }
+  catch (e) {
     const code = e.status || 500;
     dbg("create_error:", e?.message || e);
-    res
-      .status(code)
-      .json({ ok: false, error: "CREATE_FAILED", message: e?.message || "unknown" });
+    res.status(code).json({ ok:false, error:"CREATE_FAILED", message:e?.message || "unknown" });
   }
 });
 
-// GET /api/raids/:id – Detail
+// GET /api/raids/:id
 router.get("/:id", async (req, res) => {
   try {
-    // In deinem Schema ist id = Int → casten
     const idNum = Number(req.params.id);
-    if (!Number.isFinite(idNum))
-      return res.status(400).json({ ok: false, error: "BAD_ID" });
+    if (!Number.isFinite(idNum)) return res.status(400).json({ ok:false, error:"BAD_ID" });
 
     const model = getPrismaModel();
     if (model) {
       const r = await model.findUnique({ where: { id: idNum } });
-      if (!r) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-      return res.json({ ok: true, raid: await shapeForResponse(r) });
+      if (!r) return res.status(404).json({ ok:false, error:"NOT_FOUND" });
+      return res.json({ ok:true, raid: await shapeForResponse(r) });
     }
-    // JSON-Fallback
     const list = await jsonRead();
-    const r = list.find((x) => String(x.id) === String(req.params.id));
-    if (!r) return res.status(404).json({ ok: false, error: "NOT_FOUND" });
-    return res.json({ ok: true, raid: await shapeForResponse(r) });
+    const r = list.find(x => String(x.id) === String(req.params.id));
+    if (!r) return res.status(404).json({ ok:false, error:"NOT_FOUND" });
+    return res.json({ ok:true, raid: await shapeForResponse(r) });
   } catch (e) {
     dbg("detail_error:", e?.message || e);
-    res
-      .status(500)
-      .json({ ok: false, error: "DETAIL_FAILED", message: e?.message || "unknown" });
+    res.status(500).json({ ok:false, error:"DETAIL_FAILED", message:e?.message || "unknown" });
   }
 });
 
-// DELETE /api/raids/:id – Löschen
+// DELETE /api/raids/:id
 router.delete("/:id", async (req, res) => {
   try {
     const u = getUser(req);
     if (!userCanCreate(u)) {
-      return res
-        .status(403)
-        .json({ ok: false, error: "FORBIDDEN", message: "insufficient_permissions" });
+      return res.status(403).json({ ok:false, error:"FORBIDDEN", message:"insufficient_permissions" });
     }
 
     const idNum = Number(req.params.id);
-    if (!Number.isFinite(idNum))
-      return res.status(400).json({ ok: false, error: "BAD_ID" });
+    if (!Number.isFinite(idNum)) return res.status(400).json({ ok:false, error:"BAD_ID" });
 
     const model = getPrismaModel();
     if (model) {
       await model.delete({ where: { id: idNum } });
-      return res.json({ ok: true, id: idNum });
+      return res.json({ ok:true, id: idNum });
     }
-    // JSON-Fallback
     const list = await jsonRead();
-    const idx = list.findIndex((x) => String(x.id) === String(req.params.id));
-    if (idx === -1)
-      return res.status(404).json({ ok: false, error: "NOT_FOUND" });
+    const idx = list.findIndex(x => String(x.id) === String(req.params.id));
+    if (idx === -1) return res.status(404).json({ ok:false, error:"NOT_FOUND" });
     const [removed] = list.splice(idx, 1);
     await jsonWrite(list);
-    return res.json({ ok: true, id: removed?.id ?? null });
+    return res.json({ ok:true, id: removed?.id ?? null });
   } catch (e) {
     dbg("delete_error:", e?.message || e);
-    res
-      .status(500)
-      .json({ ok: false, error: "DELETE_FAILED", message: e?.message || "unknown" });
+    res.status(500).json({ ok:false, error:"DELETE_FAILED", message:e?.message || "unknown" });
   }
 });
 
