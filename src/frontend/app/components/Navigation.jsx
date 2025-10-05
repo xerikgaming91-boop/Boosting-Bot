@@ -59,6 +59,7 @@ export default function Navigation() {
           <Link to="/presets" className="text-slate-400 hover:text-slate-200">Presets</Link>
           <Link to="/chars" className="text-slate-400 hover:text-slate-200">Chars</Link>
           <Link to="/users" className="text-slate-400 hover:text-slate-200">Users</Link>
+          <Link to="/myRaids" className="text-slate-400 hover:text-slate-200">myRaids</Link>
         </div>
 
         <div className="flex items-center gap-3">
